@@ -457,15 +457,11 @@ function AudioPlayer({ script, format }) {
   const [playing, setPlaying] = useState(false);
   const [paused, setPaused]   = useState(false);
   const [speed, setSpeed]     = useState(1);
-  const [voices, setVoices]   = useState([]);
-  const [voice, setVoice]     = useState(null);
   const [pct, setPct]         = useState(0);
   const [mp3Url, setMp3Url]   = useState(null);
   const [mp3Loading, setMp3Loading] = useState(false);
   const [mp3Error, setMp3Error] = useState("");
   const audioRef = useRef(null);
-  const chunksRef = useRef([]);
-  const chunkIndexRef = useRef(0);
   const meta = FORMAT_META[format];
 
   const clean = format === "podcast"
@@ -474,34 +470,8 @@ function AudioPlayer({ script, format }) {
 
   const wc = useRef(clean.split(/\s+/).length);
 
-  // Split text into chunks for SpeechSynthesis (max ~150 words each)
-  const getChunks = useCallback(() => {
-    const sentences = clean.split(/(?<=[.!?])\s+/);
-    const chunks = [];
-    let current = "";
-    for (const s of sentences) {
-      if ((current + " " + s).split(/\s+/).length > 150 && current) {
-        chunks.push(current.trim());
-        current = s;
-      } else {
-        current = current ? current + " " + s : s;
-      }
-    }
-    if (current.trim()) chunks.push(current.trim());
-    return chunks;
-  }, [clean]);
-
   useEffect(() => {
-    const load = () => {
-      const v = speechSynthesis.getVoices().filter(v => v.lang.startsWith("en"));
-      setVoices(v);
-      const best = v.find(x => /google|samantha|daniel|karen|moira/i.test(x.name)) || v[0];
-      if (best) setVoice(best);
-    };
-    load();
-    speechSynthesis.onvoiceschanged = load;
     return () => {
-      speechSynthesis.cancel();
       if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
     };
   },[]);
@@ -517,51 +487,28 @@ function AudioPlayer({ script, format }) {
     return () => { audio.removeEventListener("timeupdate", onTime); audio.removeEventListener("ended", onEnd); };
   }, [mp3Url]);
 
-  const speakChunk = useCallback((index) => {
-    const chunks = chunksRef.current;
-    if (index >= chunks.length) {
-      setPlaying(false); setPaused(false); setPct(100);
-      return;
-    }
-    const u = new SpeechSynthesisUtterance(chunks[index]);
-    if (voice) u.voice = voice;
-    u.rate = speed;
-    u.onboundary = () => {
-      const wordsBeforeChunk = chunks.slice(0, index).join(" ").split(/\s+/).filter(Boolean).length;
-      const progress = (wordsBeforeChunk + chunks[index].slice(0, 50).split(/\s+/).length) / wc.current * 100;
-      setPct(Math.min(progress, 99));
-    };
-    u.onend = () => {
-      chunkIndexRef.current = index + 1;
-      speakChunk(index + 1);
-    };
-    u.onerror = () => { setPlaying(false); setPaused(false); };
-    speechSynthesis.speak(u);
-  }, [voice, speed]);
-
-  const playBrowser = useCallback(() => {
-    speechSynthesis.cancel();
-    chunksRef.current = getChunks();
-    chunkIndexRef.current = 0;
-    speakChunk(0);
-    setPlaying(true); setPaused(false); setPct(0);
-  }, [getChunks, speakChunk]);
-
   const [loadingMsg, setLoadingMsg] = useState("");
+
+  /** Generate MP3 blob via OpenAI TTS */
+  const generateOpenAIMp3 = async (onProgress) => {
+    if (format === "podcast") {
+      return await generatePodcastMp3OpenAI(script, onProgress);
+    } else {
+      return await generateSingleVoiceMp3OpenAI(script, format);
+    }
+  };
 
   const playMp3InBrowser = async () => {
     if (mp3Url) {
-      // Already have MP3 — just play it
       audioRef.current.currentTime = 0;
       audioRef.current.playbackRate = speed;
       audioRef.current.play();
       setPlaying(true); setPaused(false);
       return;
     }
-    // Generate MP3 via Worker → ElevenLabs (multi-voice for podcast)
     setMp3Loading(true); setMp3Error(""); setLoadingMsg("Preparing audio...");
     try {
-      const blob = await generateMp3Blob(script, format, (msg) => setLoadingMsg(msg));
+      const blob = await generateOpenAIMp3((msg) => setLoadingMsg(msg));
       const blobUrl = URL.createObjectURL(blob);
       setMp3Url(blobUrl);
       const audio = new Audio(blobUrl);
@@ -571,25 +518,21 @@ function AudioPlayer({ script, format }) {
       setPlaying(true); setPaused(false);
     } catch (err) {
       setMp3Error(err.message);
-      playBrowser();
     } finally {
       setMp3Loading(false); setLoadingMsg("");
     }
   };
 
   const pause_ = () => {
-    if (audioRef.current && mp3Url) { audioRef.current.pause(); }
-    else { speechSynthesis.pause(); }
+    if (audioRef.current) { audioRef.current.pause(); }
     setPlaying(false); setPaused(true);
   };
   const resume_ = () => {
-    if (audioRef.current && mp3Url) { audioRef.current.play(); }
-    else { speechSynthesis.resume(); }
+    if (audioRef.current) { audioRef.current.play(); }
     setPlaying(true); setPaused(false);
   };
   const stop_ = () => {
-    if (audioRef.current && mp3Url) { audioRef.current.pause(); audioRef.current.currentTime = 0; }
-    speechSynthesis.cancel();
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0; }
     setPlaying(false); setPaused(false); setPct(0);
   };
 
@@ -610,7 +553,11 @@ function AudioPlayer({ script, format }) {
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ fontSize:13, color:"#aaa", fontFamily:BRAND.monoFont }}>SPEED</span>
           <input type="range" min="0.6" max="2.5" step="0.1" value={speed}
-            onChange={e => { setSpeed(+e.target.value); if (playing||paused) stop_(); }}
+            onChange={e => {
+              const newSpeed = +e.target.value;
+              setSpeed(newSpeed);
+              if (audioRef.current) { audioRef.current.playbackRate = newSpeed; }
+            }}
             style={{ width:72, accentColor:meta.color }} />
           <span style={{ fontSize:14, color:meta.color, fontFamily:BRAND.monoFont, width:32 }}>{speed.toFixed(1)}×</span>
         </div>
@@ -631,7 +578,7 @@ function AudioPlayer({ script, format }) {
         <span style={{ flex:1 }} />
         <span style={{ fontSize:14, color:"#aaa", fontFamily:BRAND.monoFont }}>~{mins} min</span>
       </div>
-      {mp3Error && <div style={{ fontSize:14, color:"#e06050", fontFamily:BRAND.monoFont, marginTop:8 }}>Voice error: {mp3Error} — using browser voice</div>}
+      {mp3Error && <div style={{ fontSize:14, color:"#e06050", fontFamily:BRAND.monoFont, marginTop:8 }}>Voice error: {mp3Error}</div>}
     </div>
   );
 }
