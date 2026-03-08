@@ -13,26 +13,39 @@ const VOICE_ID_ALEX = "pNInz6obpgDQGcFmaJgB";    // Adam
 const VOICE_ID_MORGAN = "XrExE9yKIg1WjnnlVkGX";  // Matilda
 const VOICE_ID_DEFAULT = VOICE_ID_ALEX;
 
+/* ─── SyncShepherd Brand ─────────────────────────────────────────────────── */
+const BRAND = {
+  blue: "#0f70b7",
+  gold: "#eeaf00",
+  navy: "#192534",
+  darkBg: "#0e1117",
+  cardBg: "#141a23",
+  borderColor: "#253040",
+  headingFont: "'Heebo', sans-serif",
+  bodyFont: "'Roboto', sans-serif",
+  monoFont: "'Roboto Mono', 'Courier New', monospace",
+};
+
 const FORMAT_META = {
   video: {
     label: "🎬 Video Script",
     tag: "VIDEO",
-    color: "#e05c2a",
-    glow: "rgba(224,92,42,0.4)",
+    color: "#eeaf00",
+    glow: "rgba(238,175,0,0.35)",
     desc: "Scene-by-scene with visual cues & B-roll"
   },
   podcast: {
     label: "🎙 Dual-Host Podcast",
     tag: "PODCAST",
-    color: "#2ab8e0",
-    glow: "rgba(42,184,224,0.4)",
+    color: "#0f70b7",
+    glow: "rgba(15,112,183,0.35)",
     desc: "Two hosts, full dialogue, natural flow"
   },
   tts: {
     label: "📢 TTS Narration",
     tag: "NARRATION",
-    color: "#60c860",
-    glow: "rgba(96,200,96,0.4)",
+    color: "#34b899",
+    glow: "rgba(52,184,153,0.35)",
     desc: "Audio-optimised spoken-word prose"
   }
 };
@@ -284,11 +297,11 @@ async function generateMp3Blob(scriptText, format, onProgress) {
 function Ticker() {
   const items = ["SERVER-SIDE FETCH","NO CORS LIMITS","URL → BROADCAST READY","VIDEO · PODCAST · TTS","POWERED BY CLAUDE AI","READS ANY PUBLIC PAGE","MP3 EXPORT VIA ELEVENLABS"];
   return (
-    <div style={{ overflow:"hidden", borderTop:"1px solid #1a1a1a", borderBottom:"1px solid #1a1a1a", background:"#060606", height:26, display:"flex", alignItems:"center" }}>
+    <div style={{ overflow:"hidden", borderTop:`1px solid ${BRAND.borderColor}`, borderBottom:`1px solid ${BRAND.borderColor}`, background:BRAND.navy, height:30, display:"flex", alignItems:"center" }}>
       <div style={{ display:"inline-flex", gap:48, animation:"ticker 22s linear infinite", whiteSpace:"nowrap", paddingLeft:"100%" }}>
         {[...items,...items].map((t,i) => (
-          <span key={i} style={{ fontSize:10, letterSpacing:"0.2em", color:"#383838", fontFamily:"'Courier New',monospace", textTransform:"uppercase" }}>
-            <span style={{ color:"#e05c2a", marginRight:10 }}>◆</span>{t}
+          <span key={i} style={{ fontSize:13, letterSpacing:"0.2em", color:"#8899aa", fontFamily:BRAND.monoFont, textTransform:"uppercase" }}>
+            <span style={{ color:BRAND.gold, marginRight:10 }}>◆</span>{t}
           </span>
         ))}
       </div>
@@ -300,15 +313,15 @@ function Ticker() {
 function FormatCard({ id, meta, selected, onClick }) {
   return (
     <button onClick={onClick} style={{
-      flex:"1 1 200px", minWidth:200, border:`1.5px solid ${selected ? meta.color : "#1c1c1c"}`,
-      borderRadius:10, background: selected ? `${meta.color}10` : "#0c0c0c",
+      flex:"1 1 200px", minWidth:200, border:`1.5px solid ${selected ? meta.color : BRAND.borderColor}`,
+      borderRadius:10, background: selected ? `${meta.color}12` : BRAND.cardBg,
       padding:"16px 14px", cursor:"pointer", textAlign:"left", transition:"all 0.2s",
       boxShadow: selected ? `0 0 28px ${meta.glow}` : "none", position:"relative", overflow:"hidden"
     }}>
       {selected && <div style={{ position:"absolute", top:0, left:0, right:0, height:2, background:`linear-gradient(to right,${meta.color},transparent)` }} />}
       <div style={{ fontSize:22, marginBottom:6 }}>{meta.label.split(" ")[0]}</div>
-      <div style={{ fontSize:11, fontWeight:700, color: selected ? meta.color : "#444", letterSpacing:"0.1em", fontFamily:"'Courier New',monospace", marginBottom:6 }}>{meta.tag}</div>
-      <div style={{ fontSize:12, color:"#3a3a3a", lineHeight:1.5 }}>{meta.desc}</div>
+      <div style={{ fontSize:14, fontWeight:700, color: selected ? meta.color : "#bbb", letterSpacing:"0.1em", fontFamily:BRAND.monoFont, marginBottom:6 }}>{meta.tag}</div>
+      <div style={{ fontSize:14, color:"#bbb", lineHeight:1.5, fontFamily:BRAND.bodyFont }}>{meta.desc}</div>
     </button>
   );
 }
@@ -316,15 +329,15 @@ function FormatCard({ id, meta, selected, onClick }) {
 function ScriptBlock({ content, format }) {
   const meta = FORMAT_META[format];
   return (
-    <div style={{ padding:"28px 28px 36px", fontFamily:"'Georgia',serif" }}>
+    <div style={{ padding:"28px 28px 36px", fontFamily:BRAND.bodyFont }}>
       {content.split("\n").map((line, i) => {
         if (!line.trim()) return <div key={i} style={{ height:8 }} />;
 
         if (format === "video" && /^\[(VISUAL|B-ROLL|GRAPHIC|ON-SCREEN|END CARD)[^\]]*\]/i.test(line)) {
           return (
             <div key={i} style={{ display:"flex", gap:10, margin:"14px 0", alignItems:"flex-start" }}>
-              <span style={{ fontSize:9, color:meta.color, fontFamily:"'Courier New',monospace", letterSpacing:"0.1em", paddingTop:4, flexShrink:0 }}>▶ CUE</span>
-              <div style={{ background:`${meta.color}12`, border:`1px solid ${meta.color}28`, borderRadius:6, padding:"8px 14px", fontSize:13, color:"#999", fontStyle:"italic", flex:1, fontFamily:"'Courier New',monospace", lineHeight:1.6 }}>
+              <span style={{ fontSize:11, color:meta.color, fontFamily:BRAND.monoFont, letterSpacing:"0.1em", paddingTop:4, flexShrink:0 }}>▶ CUE</span>
+              <div style={{ background:`${meta.color}12`, border:`1px solid ${meta.color}28`, borderRadius:6, padding:"8px 14px", fontSize:14, color:"#aaa", fontStyle:"italic", flex:1, fontFamily:BRAND.monoFont, lineHeight:1.6 }}>
                 {line}
               </div>
             </div>
@@ -336,30 +349,30 @@ function ScriptBlock({ content, format }) {
           const morgan = line.match(/^MORGAN:\s*(.*)/);
           if (alex) return (
             <div key={i} style={{ display:"flex", gap:14, margin:"12px 0" }}>
-              <span style={{ width:60, flexShrink:0, fontSize:10, fontWeight:700, color:"#2ab8e0", fontFamily:"'Courier New',monospace", letterSpacing:"0.08em", paddingTop:4 }}>ALEX</span>
-              <p style={{ margin:0, flex:1, fontSize:15, color:"#ccc", lineHeight:1.8 }}>{alex[1]}</p>
+              <span style={{ width:60, flexShrink:0, fontSize:12, fontWeight:700, color:BRAND.blue, fontFamily:BRAND.monoFont, letterSpacing:"0.08em", paddingTop:4 }}>ALEX</span>
+              <p style={{ margin:0, flex:1, fontSize:16, color:"#ccc", lineHeight:1.8, fontFamily:BRAND.bodyFont }}>{alex[1]}</p>
             </div>
           );
           if (morgan) return (
             <div key={i} style={{ display:"flex", gap:14, margin:"12px 0" }}>
-              <span style={{ width:60, flexShrink:0, fontSize:10, fontWeight:700, color:"#e0a02a", fontFamily:"'Courier New',monospace", letterSpacing:"0.08em", paddingTop:4 }}>MORGAN</span>
-              <p style={{ margin:0, flex:1, fontSize:15, color:"#ccc", lineHeight:1.8 }}>{morgan[1]}</p>
+              <span style={{ width:60, flexShrink:0, fontSize:12, fontWeight:700, color:BRAND.gold, fontFamily:BRAND.monoFont, letterSpacing:"0.08em", paddingTop:4 }}>MORGAN</span>
+              <p style={{ margin:0, flex:1, fontSize:16, color:"#ccc", lineHeight:1.8, fontFamily:BRAND.bodyFont }}>{morgan[1]}</p>
             </div>
           );
           if (/^\[.+\]$/.test(line.trim())) return (
-            <div key={i} style={{ fontSize:12, color:"#444", fontStyle:"italic", fontFamily:"'Courier New',monospace", margin:"4px 0 4px 74px" }}>{line}</div>
+            <div key={i} style={{ fontSize:14, color:"#999", fontStyle:"italic", fontFamily:BRAND.monoFont, margin:"4px 0 4px 74px" }}>{line}</div>
           );
         }
 
         if (/^(SCENE|SEGMENT|SECTION|INTRO|OUTRO|HOOK|CONCLUSION|BODY)\b/i.test(line) || /^#{1,3} /.test(line)) {
           return (
-            <div key={i} style={{ borderLeft:`3px solid ${meta.color}`, paddingLeft:14, margin:"28px 0 10px", fontSize:12, fontWeight:700, color:meta.color, letterSpacing:"0.14em", fontFamily:"'Courier New',monospace", textTransform:"uppercase" }}>
+            <div key={i} style={{ borderLeft:`3px solid ${meta.color}`, paddingLeft:14, margin:"28px 0 10px", fontSize:14, fontWeight:700, color:meta.color, letterSpacing:"0.14em", fontFamily:BRAND.headingFont, textTransform:"uppercase" }}>
               {line.replace(/^#+\s*/,"")}
             </div>
           );
         }
 
-        return <p key={i} style={{ margin:"0 0 2px", fontSize:15, color:"#c0c0c0", lineHeight:1.85 }}>{line}</p>;
+        return <p key={i} style={{ margin:"0 0 2px", fontSize:16, color:"#c0c0c0", lineHeight:1.85, fontFamily:BRAND.bodyFont }}>{line}</p>;
       })}
     </div>
   );
@@ -508,7 +521,7 @@ function AudioPlayer({ script, format }) {
   const bars = [26,16,30,12,24,18,28,14,22,20];
   const mins = Math.max(1, Math.round(wc.current / (speed * 145)));
   return (
-    <div style={{ background:"#0a0a0a", border:`1px solid ${meta.color}35`, borderRadius:12, padding:"18px 22px", marginBottom:20 }}>
+    <div style={{ background:BRAND.navy, border:`1px solid ${meta.color}35`, borderRadius:12, padding:"18px 22px", marginBottom:20 }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
         <div style={{ display:"flex", alignItems:"flex-end", gap:3, height:30 }}>
           {bars.map((h,i) => (
@@ -520,11 +533,11 @@ function AudioPlayer({ script, format }) {
           <style>{`@keyframes wb1{from{height:4px}to{height:26px}}@keyframes wb2{from{height:5px}to{height:18px}}@keyframes wb3{from{height:7px}to{height:30px}}@keyframes wb4{from{height:4px}to{height:14px}}`}</style>
         </div>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <span style={{ fontSize:10, color:"#333", fontFamily:"monospace" }}>SPEED</span>
+          <span style={{ fontSize:13, color:"#aaa", fontFamily:BRAND.monoFont }}>SPEED</span>
           <input type="range" min="0.6" max="2.5" step="0.1" value={speed}
             onChange={e => { setSpeed(+e.target.value); if (playing||paused) stop_(); }}
             style={{ width:72, accentColor:meta.color }} />
-          <span style={{ fontSize:11, color:meta.color, fontFamily:"monospace", width:28 }}>{speed.toFixed(1)}×</span>
+          <span style={{ fontSize:14, color:meta.color, fontFamily:BRAND.monoFont, width:32 }}>{speed.toFixed(1)}×</span>
         </div>
       </div>
       <div style={{ height:3, background:"#181818", borderRadius:2, marginBottom:14, overflow:"hidden" }}>
@@ -539,11 +552,11 @@ function AudioPlayer({ script, format }) {
               ? <button disabled style={{...btnS(meta.color), opacity:0.5, cursor:"wait"}}>{loadingMsg || "Loading AI voice..."}</button>
               : <button onClick={playMp3InBrowser} style={btnS(meta.color, true)}>▶ Play (AI Voice)</button>}
         <button onClick={stop_} style={btnS("#2a2a2a")}>⏹</button>
-        {mp3Url && <span style={{ fontSize:10, color:"#2a6", fontFamily:"monospace" }}>{format === "podcast" ? "● Dual-voice loaded" : "● AI voice loaded"}</span>}
+        {mp3Url && <span style={{ fontSize:13, color:"#2a6", fontFamily:BRAND.monoFont }}>{format === "podcast" ? "● Dual-voice loaded" : "● AI voice loaded"}</span>}
         <span style={{ flex:1 }} />
-        <span style={{ fontSize:11, color:"#333", fontFamily:"monospace" }}>~{mins} min</span>
+        <span style={{ fontSize:14, color:"#aaa", fontFamily:BRAND.monoFont }}>~{mins} min</span>
       </div>
-      {mp3Error && <div style={{ fontSize:11, color:"#e06050", fontFamily:"monospace", marginTop:8 }}>Voice error: {mp3Error} — using browser voice</div>}
+      {mp3Error && <div style={{ fontSize:14, color:"#e06050", fontFamily:BRAND.monoFont, marginTop:8 }}>Voice error: {mp3Error} — using browser voice</div>}
     </div>
   );
 }
@@ -551,8 +564,8 @@ function AudioPlayer({ script, format }) {
 const btnS = (color, primary=false) => ({
   background: primary ? color : "transparent",
   border:`1px solid ${color}`, borderRadius:7,
-  color: primary ? "#000" : color, padding:"8px 18px",
-  cursor:"pointer", fontSize:13, fontFamily:"'Courier New',monospace",
+  color: primary ? "#000" : color, padding:"10px 20px",
+  cursor:"pointer", fontSize:15, fontFamily:BRAND.monoFont,
   letterSpacing:"0.05em", fontWeight: primary ? 700 : 400, transition:"all 0.15s"
 });
 
@@ -587,22 +600,22 @@ function RepoFilePicker({ selectedPages, setSelectedPages }) {
 
   const estimatedWords = selectedPages.length * 800; // rough estimate per page
 
-  if (loading) return <div style={{ color: "#333", fontSize: 12, fontFamily: "monospace", padding: "12px 0" }}>Loading repo files...</div>;
-  if (error) return <div style={{ color: "#e06050", fontSize: 12, fontFamily: "monospace", padding: "12px 0" }}>{error}</div>;
+  if (loading) return <div style={{ color: "#bbb", fontSize: 14, fontFamily: BRAND.monoFont, padding: "12px 0" }}>Loading repo files...</div>;
+  if (error) return <div style={{ color: "#e06050", fontSize: 12, fontFamily: BRAND.monoFont, padding: "12px 0" }}>{error}</div>;
 
   return (
     <div>
       <div style={{
-        maxHeight: 220, overflowY: "auto", background: "#0a0a0a", border: "1px solid #1c1c1c",
+        maxHeight: 220, overflowY: "auto", background: BRAND.cardBg, border: `1px solid ${BRAND.borderColor}`,
         borderRadius: 10, padding: "8px 0",
         scrollbarWidth: "thin", scrollbarColor: "#222 #0a0a0a"
       }}>
         {repoFiles.map(path => (
           <label key={path} style={{
             display: "flex", alignItems: "center", gap: 10, padding: "7px 14px",
-            cursor: "pointer", fontSize: 13, color: selectedPages.includes(path) ? "#e0e0e0" : "#555",
-            fontFamily: "'Courier New',monospace", transition: "background 0.15s",
-            background: selectedPages.includes(path) ? "#111" : "transparent",
+            cursor: "pointer", fontSize: 15, color: selectedPages.includes(path) ? "#e0e0e0" : "#bbb",
+            fontFamily: BRAND.monoFont, transition: "background 0.15s",
+            background: selectedPages.includes(path) ? "#1c1c1c" : "transparent",
           }}>
             <input
               type="checkbox"
@@ -610,13 +623,13 @@ function RepoFilePicker({ selectedPages, setSelectedPages }) {
               onChange={() => toggle(path)}
               style={{ accentColor: "#60c860" }}
             />
-            <span style={{ fontSize: 11, color: "#333", width: 28 }}>{/\.md$/i.test(path) ? "MD" : "HTML"}</span>
+            <span style={{ fontSize: 13, color: "#aaa", width: 32 }}>{/\.md$/i.test(path) ? "MD" : "HTML"}</span>
             {path}
           </label>
         ))}
       </div>
       {selectedPages.length > 0 && (
-        <div style={{ fontSize: 11, color: "#444", fontFamily: "monospace", marginTop: 8, paddingLeft: 2 }}>
+        <div style={{ fontSize: 14, color: "#bbb", fontFamily: BRAND.monoFont, marginTop: 8, paddingLeft: 2 }}>
           {selectedPages.length} page{selectedPages.length > 1 ? "s" : ""} selected · ~{estimatedWords.toLocaleString()} words estimated
         </div>
       )}
@@ -636,11 +649,11 @@ function InputModeTabs({ inputMode, setInputMode, color }) {
       {tabs.map(tab => (
         <button key={tab.id} onClick={() => setInputMode(tab.id)} style={{
           flex: 1, padding: "10px 16px", cursor: "pointer",
-          background: inputMode === tab.id ? "#111" : "#080808",
-          border: `1px solid ${inputMode === tab.id ? color : "#1a1a1a"}`,
-          borderBottom: inputMode === tab.id ? `2px solid ${color}` : "1px solid #1a1a1a",
-          color: inputMode === tab.id ? color : "#444",
-          fontSize: 12, fontFamily: "'Courier New',monospace", letterSpacing: "0.08em",
+          background: inputMode === tab.id ? BRAND.cardBg : BRAND.darkBg,
+          border: `1px solid ${inputMode === tab.id ? color : BRAND.borderColor}`,
+          borderBottom: inputMode === tab.id ? `2px solid ${color}` : `1px solid ${BRAND.borderColor}`,
+          color: inputMode === tab.id ? color : "#bbb",
+          fontSize: 15, fontFamily: BRAND.monoFont, letterSpacing: "0.08em",
           fontWeight: inputMode === tab.id ? 700 : 400, transition: "all 0.2s",
           borderRadius: tab.id === "url" ? "8px 0 0 0" : "0 8px 0 0",
         }}>
@@ -696,12 +709,12 @@ function ExportMp3Button({ output, format, meta }) {
           {exportStatus === "error" && "⚠ Retry MP3"}
           {exportStatus === "idle" && "🔊 Export MP3"}
         </button>
-        <span style={{ fontSize: 10, color: "#333", fontFamily: "monospace" }}>
+        <span style={{ fontSize: 13, color: "#aaa", fontFamily: BRAND.monoFont }}>
           ~{charCount.toLocaleString()} chars · ~{charCount} credits
         </span>
       </div>
       {exportStatus === "error" && exportError && (
-        <div style={{ fontSize: 11, color: meta.color, fontFamily: "monospace", marginTop: 6 }}>
+        <div style={{ fontSize: 14, color: meta.color, fontFamily: BRAND.monoFont, marginTop: 6 }}>
           ElevenLabs error: {exportError}
         </div>
       )}
@@ -802,37 +815,37 @@ export default function PageCast() {
   };
 
   return (
-    <div style={{ minHeight:"100vh", background:"#080808", color:"#d0d0d0", fontFamily:"'Georgia',serif" }}>
+    <div style={{ minHeight:"100vh", background:BRAND.darkBg, color:"#d0d0d0", fontFamily:BRAND.bodyFont }}>
 
       {/* top bar */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 28px", height:52, borderBottom:"1px solid #141414", background:"#050505" }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 28px", height:52, borderBottom:`1px solid ${BRAND.borderColor}`, background:BRAND.navy }}>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
           <span style={{ width:7, height:7, borderRadius:"50%", display:"inline-block",
-            background: busy ? "#e05c2a" : "#222",
-            boxShadow: busy ? "0 0 8px #e05c2a" : "none",
+            background: busy ? BRAND.gold : "#555",
+            boxShadow: busy ? `0 0 8px ${BRAND.gold}` : "none",
             animation: busy ? "blink 1s ease-in-out infinite" : "none" }} />
           <style>{`@keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}`}</style>
-          <span style={{ fontSize:10, fontFamily:"'Courier New',monospace", letterSpacing:"0.18em", color:"#2a2a2a", textTransform:"uppercase" }}>
+          <span style={{ fontSize:13, fontFamily:BRAND.monoFont, letterSpacing:"0.18em", color:"#bcc8d4", textTransform:"uppercase" }}>
             {busy ? statusMsg : phase === "done" ? "● OUTPUT READY" : "PAGECAST"}
           </span>
         </div>
-        <span style={{ fontSize:10, color:"#1e1e1e", fontFamily:"'Courier New',monospace", letterSpacing:"0.12em" }}>SYNCSHEPHERD STUDIO</span>
+        <span style={{ fontSize:13, color:BRAND.gold, fontFamily:BRAND.headingFont, fontWeight:700, letterSpacing:"0.12em" }}>SYNCSHEPHERD STUDIO</span>
       </div>
 
       <Ticker />
 
       {/* hero */}
-      <div style={{ textAlign:"center", padding:"54px 24px 44px", borderBottom:"1px solid #101010", position:"relative", overflow:"hidden" }}>
+      <div style={{ textAlign:"center", padding:"54px 24px 44px", borderBottom:`1px solid ${BRAND.borderColor}`, position:"relative", overflow:"hidden" }}>
         <div style={{ position:"absolute", top:"60%", left:"50%", transform:"translate(-50%,-50%)", width:700, height:400,
-          background:`radial-gradient(ellipse, ${meta.color}06 0%, transparent 65%)`, pointerEvents:"none", transition:"background 0.4s" }} />
-        <div style={{ fontSize:10, letterSpacing:"0.3em", color:"#2e2e2e", fontFamily:"'Courier New',monospace", marginBottom:18, textTransform:"uppercase" }}>
+          background:`radial-gradient(ellipse, ${BRAND.blue}10 0%, transparent 65%)`, pointerEvents:"none" }} />
+        <div style={{ fontSize:13, letterSpacing:"0.3em", color:"#8899aa", fontFamily:BRAND.monoFont, marginBottom:18, textTransform:"uppercase" }}>
           ◆ URL-to-Broadcast Engine · Server-Side Fetch
         </div>
-        <h1 style={{ margin:"0 0 10px", fontSize:"clamp(38px,6vw,70px)", fontWeight:900, lineHeight:1.0, letterSpacing:"-0.02em", color:"#efefef" }}>
+        <h1 style={{ margin:"0 0 10px", fontSize:"clamp(38px,6vw,70px)", fontWeight:900, lineHeight:1.0, letterSpacing:"-0.02em", color:"#fff", fontFamily:BRAND.headingFont }}>
           Page<br />
-          <span style={{ color:meta.color, transition:"color 0.3s" }}>Cast</span>
+          <span style={{ color:BRAND.blue, transition:"color 0.3s" }}>Cast</span>
         </h1>
-        <p style={{ fontSize:15, color:"#3a3a3a", maxWidth:440, margin:"16px auto 0", lineHeight:1.7 }}>
+        <p style={{ fontSize:17, color:"#bcc8d4", maxWidth:500, margin:"16px auto 0", lineHeight:1.7, fontFamily:BRAND.bodyFont }}>
           Paste any public URL or select from Gary's Garden. The Worker fetches the full page server-side — no browser limits, no CORS, no proxies.
         </p>
       </div>
@@ -846,7 +859,7 @@ export default function PageCast() {
         {inputMode === "url" && (
           <div style={{ marginBottom:20 }}>
             <div style={{ position:"relative" }}>
-              <span style={{ position:"absolute", left:16, top:"50%", transform:"translateY(-50%)", fontSize:12, color:"#2a2a2a", fontFamily:"'Courier New',monospace", pointerEvents:"none" }}>URL →</span>
+              <span style={{ position:"absolute", left:16, top:"50%", transform:"translateY(-50%)", fontSize:15, color:"#8899aa", fontFamily:BRAND.monoFont, pointerEvents:"none" }}>URL →</span>
               <input
                 type="url"
                 value={url}
@@ -854,16 +867,16 @@ export default function PageCast() {
                 onKeyDown={e => e.key === "Enter" && !busy && run()}
                 placeholder="https://any-public-website.com/page"
                 disabled={busy}
-                style={{ width:"100%", background:"#0c0c0c", border:"1px solid #1c1c1c", borderRadius:10,
-                  padding:"16px 16px 16px 70px", color:"#e0e0e0", fontSize:15,
-                  fontFamily:"'Courier New',monospace", outline:"none", boxSizing:"border-box", transition:"border-color 0.2s" }}
-                onFocus={e => e.target.style.borderColor = meta.color}
-                onBlur={e => e.target.style.borderColor = "#1c1c1c"}
+                style={{ width:"100%", background:BRAND.cardBg, border:`1px solid ${BRAND.borderColor}`, borderRadius:10,
+                  padding:"16px 16px 16px 76px", color:"#e0e0e0", fontSize:17,
+                  fontFamily:BRAND.monoFont, outline:"none", boxSizing:"border-box", transition:"border-color 0.2s" }}
+                onFocus={e => e.target.style.borderColor = BRAND.blue}
+                onBlur={e => e.target.style.borderColor = BRAND.borderColor}
               />
             </div>
             {/* Crawl links checkbox (Task 4) */}
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12, color: "#333", fontFamily: "'Courier New',monospace" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 15, color: "#bcc8d4", fontFamily: BRAND.monoFont }}>
                 <input
                   type="checkbox"
                   checked={crawlLinks}
@@ -873,7 +886,7 @@ export default function PageCast() {
                 Include linked pages (crawl up to 10)
               </label>
             </div>
-            <div style={{ fontSize:11, color:"#262626", fontFamily:"'Courier New',monospace", marginTop:7, paddingLeft:2 }}>
+            <div style={{ fontSize:14, color:"#8899aa", fontFamily:BRAND.monoFont, marginTop:7, paddingLeft:2 }}>
               Works on articles, blogs, business sites, docs, news — any publicly accessible page.
             </div>
           </div>
@@ -899,11 +912,11 @@ export default function PageCast() {
 
         {/* Generate button */}
         <button onClick={run} disabled={busy} style={{
-          width:"100%", padding:"17px", borderRadius:11, border:"none",
+          width:"100%", padding:"18px", borderRadius:11, border:"none",
           background: busy ? "#111" : `linear-gradient(135deg,${meta.color}dd,${meta.color})`,
-          color: busy ? "#2a2a2a" : "#000", fontSize:15, fontWeight:900,
+          color: busy ? "#2a2a2a" : "#000", fontSize:17, fontWeight:900,
           cursor: busy ? "not-allowed" : "pointer", letterSpacing:"0.1em",
-          fontFamily:"'Courier New',monospace", textTransform:"uppercase",
+          fontFamily:BRAND.headingFont, textTransform:"uppercase",
           transition:"all 0.2s", boxShadow: busy ? "none" : `0 0 30px ${meta.glow}`,
           marginBottom:10
         }}>
@@ -922,8 +935,8 @@ export default function PageCast() {
         {/* error */}
         {error && (
           <div style={{ background:"#0f0808", border:"1px solid #4a1010", borderRadius:10, padding:"16px 20px", marginBottom:20, lineHeight:1.7 }}>
-            <div style={{ fontSize:14, color:"#e06050", marginBottom:6 }}><strong>⚠ Error</strong> — {error}</div>
-            <div style={{ fontSize:13, color:"#555" }}>
+            <div style={{ fontSize:16, color:"#e06050", marginBottom:6 }}><strong>⚠ Error</strong> — {error}</div>
+            <div style={{ fontSize:15, color:"#bbb" }}>
               This usually means the page requires a login, is behind a paywall, or is a JavaScript single-page app. Try a direct article URL rather than a homepage.
             </div>
           </div>
@@ -939,8 +952,8 @@ export default function PageCast() {
             <div style={{ display:"flex", alignItems:"center", gap:12 }}>
               <div style={{ width:3, height:30, background:meta.color, borderRadius:2, boxShadow:`0 0 14px ${meta.glow}` }} />
               <div>
-                <div style={{ fontSize:10, color:meta.color, letterSpacing:"0.2em", fontFamily:"'Courier New',monospace" }}>{meta.tag} · OUTPUT READY</div>
-                <div style={{ fontSize:13, color:"#444", marginTop:2 }}>
+                <div style={{ fontSize:13, color:meta.color, letterSpacing:"0.2em", fontFamily:BRAND.monoFont }}>{meta.tag} · OUTPUT READY</div>
+                <div style={{ fontSize:15, color:"#bbb", marginTop:2 }}>
                   {sourceWordCount > 0 && <>{sourceWordCount.toLocaleString()} words in → </>}
                   {output.split(/\s+/).length.toLocaleString()} words out
                 </div>
@@ -958,11 +971,11 @@ export default function PageCast() {
           {format !== "video" && <AudioPlayer script={output} format={format} />}
 
           {/* script viewer */}
-          <div style={{ background:"#0c0c0c", border:"1px solid #1a1a1a", borderRadius:14, overflow:"hidden", boxShadow:"0 4px 50px rgba(0,0,0,0.6)" }}>
-            <div style={{ background:"#080808", borderBottom:"1px solid #181818", padding:"10px 24px", display:"flex", alignItems:"center", gap:10 }}>
-              <span style={{ fontSize:9, background:meta.color, color:"#000", padding:"2px 8px", borderRadius:3, fontFamily:"'Courier New',monospace", fontWeight:700, letterSpacing:"0.1em" }}>{meta.tag}</span>
-              {format==="podcast" && <span style={{ fontSize:11, color:"#333", fontFamily:"monospace" }}>ALEX <span style={{color:"#2ab8e0"}}>●</span>  MORGAN <span style={{color:"#e0a02a"}}>●</span></span>}
-              {format==="video"   && <span style={{ fontSize:11, color:"#333", fontFamily:"monospace" }}>[VISUAL CUES] highlighted</span>}
+          <div style={{ background:BRAND.cardBg, border:`1px solid ${BRAND.borderColor}`, borderRadius:14, overflow:"hidden", boxShadow:"0 4px 50px rgba(0,0,0,0.6)" }}>
+            <div style={{ background:BRAND.navy, borderBottom:`1px solid ${BRAND.borderColor}`, padding:"10px 24px", display:"flex", alignItems:"center", gap:10 }}>
+              <span style={{ fontSize:9, background:meta.color, color:"#000", padding:"2px 8px", borderRadius:3, fontFamily:BRAND.monoFont, fontWeight:700, letterSpacing:"0.1em" }}>{meta.tag}</span>
+              {format==="podcast" && <span style={{ fontSize:14, color:"#bbb", fontFamily:BRAND.monoFont }}>ALEX <span style={{color:BRAND.blue}}>●</span>  MORGAN <span style={{color:BRAND.gold}}>●</span></span>}
+              {format==="video"   && <span style={{ fontSize:14, color:"#bbb", fontFamily:BRAND.monoFont }}>[VISUAL CUES] highlighted</span>}
             </div>
             <ScriptBlock content={output} format={format} />
           </div>
