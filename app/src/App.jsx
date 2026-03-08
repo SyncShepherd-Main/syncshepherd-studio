@@ -702,16 +702,16 @@ function useElevenLabsBalance() {
 }
 
 function CreditBalance({ balance, error }) {
-  if (error) return (
-    <div style={{ fontSize: 13, color: "#e0a030", fontFamily: BRAND.monoFont }}>
-      ElevenLabs: {error}
-    </div>
-  );
-  if (!balance) return (
-    <div style={{ fontSize: 13, color: "#556677", fontFamily: BRAND.monoFont }}>
-      Loading ElevenLabs balance...
-    </div>
-  );
+  if (error) {
+    const isPermission = error.includes("401") || error.includes("permission");
+    if (isPermission) return null; // API key lacks user_read scope — hide quietly
+    return (
+      <div style={{ fontSize: 13, color: "#e0a030", fontFamily: BRAND.monoFont }}>
+        ElevenLabs: {error}
+      </div>
+    );
+  }
+  if (!balance) return null;
   const { character_count, character_limit } = balance;
   const remaining = character_limit - character_count;
   const pct = remaining / character_limit;
