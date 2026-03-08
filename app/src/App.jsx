@@ -868,6 +868,67 @@ function CreditBalance({ balance, error }) {
   );
 }
 
+/* ─── OpenAI Billing Info ─────────────────────────────────────────────────── */
+
+function useOpenAIBilling() {
+  const [billing, setBilling] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch(`${WORKER_URL}/openai-billing`);
+      const data = await res.json();
+      setBilling(data);
+    } catch {
+      setBilling({ error: "Failed to fetch", rate: 0.015 });
+    }
+    setLoaded(true);
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  return { billing, loaded, refresh };
+}
+
+function OpenAIBillingDisplay({ billing }) {
+  if (!billing) return null;
+
+  const parts = [];
+
+  // Show balance if available
+  if (billing.balance && billing.balance.total_available != null) {
+    const avail = billing.balance.total_available;
+    const color = avail < 1 ? "#e05050" : avail < 5 ? "#e0a030" : "#10a37f";
+    parts.push(
+      <span key="bal" style={{ color }}>
+        Balance: ${avail.toFixed(2)}
+      </span>
+    );
+  }
+
+  // Show monthly cost if available
+  if (billing.monthly_cost != null) {
+    parts.push(
+      <span key="cost" style={{ color: "#aaa" }}>
+        This month: ${billing.monthly_cost.toFixed(2)}
+      </span>
+    );
+  }
+
+  // Always show the rate
+  if (parts.length === 0) {
+    parts.push(
+      <span key="rate" style={{ color: "#10a37f" }}>
+        TTS rate: $0.015 / 1K chars
+      </span>
+    );
+  }
+
+  return (
+    <div style={{ fontSize: 13, fontFamily: BRAND.monoFont, display: "flex", gap: 12 }}>
+      <span style={{ color: "#10a37f" }}>OpenAI:</span>
+      {parts}
+    </div>
+  );
+}
+
 /* ─── Voice Engine Selector ───────────────────────────────────────────────── */
 
 const ENGINES = [
@@ -876,13 +937,13 @@ const ENGINES = [
   { id: "browser",    label: "Browser Voice (Free)", color: "#888",  icon: "🖥" },
 ];
 
-function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, output, format,
+function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBilling, output, format,
   openaiVoice1, setOpenaiVoice1, openaiVoice2, setOpenaiVoice2,
   elevenVoice1, setElevenVoice1, elevenVoice2, setElevenVoice2 }) {
 
   const cleaned = output ? cleanScriptForTTS(output, format) : "";
   const charCount = cleaned.length;
-  const estCost = (charCount / 1000 * 0.015).toFixed(3);
+  const estCost = charCount > 0 ? (charCount / 1000 * 0.015).toFixed(3) : null;
   const isPodcast = format === "podcast";
 
   const selectStyle = {
@@ -911,11 +972,13 @@ function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, outpu
             {e.icon} {e.label}
           </button>
         ))}
-        <span style={{ fontSize:12, color:"#666", fontFamily:BRAND.monoFont, marginLeft:4 }}>
-          {engine === "openai" && charCount > 0 && `~$${estCost}`}
-          {engine === "elevenlabs" && <CreditBalance balance={elBalance} error={elError} />}
-          {engine === "browser" && "Free"}
-        </span>
+        {engine === "browser" && <span style={{ fontSize:12, color:"#888", fontFamily:BRAND.monoFont, marginLeft:4 }}>Free</span>}
+      </div>
+
+      {/* Billing info row */}
+      <div style={{ marginTop:6 }}>
+        {engine === "openai" && <OpenAIBillingDisplay billing={oaiBilling} />}
+        {engine === "elevenlabs" && <CreditBalance balance={elBalance} error={elError} />}
       </div>
 
       {/* Voice picker row */}
@@ -1047,6 +1110,7 @@ export default function PageCast() {
   const [elevenVoice1, setElevenVoice1]   = useState("adam");
   const [elevenVoice2, setElevenVoice2]   = useState("matilda");
   const { balance: elBalance, error: elError, refresh: refreshBalance } = useElevenLabsBalance();
+  const { billing: oaiBilling } = useOpenAIBilling();
   const outputRef = useRef(null);
   const meta = FORMAT_META[format];
   const busy = phase === "running";
@@ -1246,7 +1310,7 @@ export default function PageCast() {
         </div>
 
         {/* Voice engine + voice selection */}
-        <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} output={null} format={format}
+        <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} oaiBilling={oaiBilling} output={null} format={format}
           openaiVoice1={openaiVoice1} setOpenaiVoice1={setOpenaiVoice1} openaiVoice2={openaiVoice2} setOpenaiVoice2={setOpenaiVoice2}
           elevenVoice1={elevenVoice1} setElevenVoice1={setElevenVoice1} elevenVoice2={elevenVoice2} setElevenVoice2={setElevenVoice2} />
 
@@ -1305,7 +1369,7 @@ export default function PageCast() {
               <button onClick={()=>{setPhase("idle");setOutput("");setError("");setSourceWordCount(0);}} style={btnS("#282828")}>↺ New</button>
             </div>
             {/* Voice engine selector */}
-            <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} output={output} format={format}
+            <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} oaiBilling={oaiBilling} output={output} format={format}
               openaiVoice1={openaiVoice1} setOpenaiVoice1={setOpenaiVoice1} openaiVoice2={openaiVoice2} setOpenaiVoice2={setOpenaiVoice2}
               elevenVoice1={elevenVoice1} setElevenVoice1={setElevenVoice1} elevenVoice2={elevenVoice2} setElevenVoice2={setElevenVoice2} />
           </div>

@@ -52,6 +52,11 @@ export default {
       return handleSubscription(env);
     }
 
+    // Route: GET /openai-billing — OpenAI billing/usage info
+    if (request.method === "GET" && path === "/openai-billing") {
+      return handleOpenAIBilling(url, env);
+    }
+
     // Route: GET /?url= — Fetch proxy (original)
     if (request.method === "GET") {
       return handleFetch(url);
@@ -206,6 +211,74 @@ async function handleTTSOpenAI(request, env) {
   } catch (err) {
     return jsonResponse({ error: `OpenAI TTS proxy error: ${err.message}` }, 500);
   }
+}
+
+/* ─── /openai-billing — OpenAI Usage & Balance ─────────────────────────────── */
+
+async function handleOpenAIBilling(url, env) {
+  if (!env.OPENAI_API_KEY) {
+    return jsonResponse({ error: "OPENAI_API_KEY not configured on worker" }, 500);
+  }
+
+  const headers = {
+    "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+    "Content-Type": "application/json",
+  };
+
+  // Get current month's usage via /v1/organization/costs
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const startTime = Math.floor(startOfMonth.getTime() / 1000);
+
+  const result = { monthly_cost: null, balance: null, error: null };
+
+  // Try organization costs endpoint (requires org-level key)
+  try {
+    const costsRes = await fetch(
+      `https://api.openai.com/v1/organization/costs?start_time=${startTime}&limit=1&group_by=project_id`,
+      { headers }
+    );
+    if (costsRes.ok) {
+      const costsData = await costsRes.json();
+      // Sum up all costs in the response
+      let totalCents = 0;
+      if (costsData.data) {
+        for (const bucket of costsData.data) {
+          if (bucket.results) {
+            for (const r of bucket.results) {
+              totalCents += r.amount?.value || 0;
+            }
+          }
+        }
+      }
+      result.monthly_cost = totalCents / 100; // Convert cents to dollars
+    }
+  } catch {
+    // Costs endpoint not available
+  }
+
+  // Try credit grants / balance endpoint
+  try {
+    const balRes = await fetch("https://api.openai.com/dashboard/billing/credit_grants", { headers });
+    if (balRes.ok) {
+      const balData = await balRes.json();
+      result.balance = {
+        total_granted: balData.total_granted,
+        total_used: balData.total_used,
+        total_available: balData.total_available,
+      };
+    }
+  } catch {
+    // Balance endpoint not available
+  }
+
+  // If neither worked, return what we can
+  if (result.monthly_cost === null && result.balance === null) {
+    return jsonResponse({ error: "Billing info unavailable — API key may lack org permissions", rate: 0.015 }, 200);
+  }
+
+  result.rate = 0.015; // $0.015 per 1K chars for tts-1
+  return jsonResponse(result, 200);
 }
 
 /* ─── /subscription — ElevenLabs Usage Info ────────────────────────────────── */
