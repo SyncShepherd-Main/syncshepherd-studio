@@ -961,6 +961,11 @@ export default function PageCast() {
           {busy ? `● ${statusMsg}` : `▶  GENERATE ${meta.tag}`}
         </button>
 
+        {/* ElevenLabs credit balance — always visible */}
+        <div style={{ textAlign:"right", marginBottom:6 }}>
+          <CreditBalance balance={elBalance} />
+        </div>
+
         {/* progress bar */}
         {busy && (
           <div style={{ height:2, background:"#111", borderRadius:1, overflow:"hidden", marginBottom:22 }}>
