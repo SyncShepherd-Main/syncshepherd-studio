@@ -313,6 +313,60 @@ async function generateMp3Blob(scriptText, format, onProgress) {
   }
 }
 
+/* ─── OpenAI TTS Export ──────────────────────────────────────────────────── */
+
+/** Fetch a single TTS clip via Worker (OpenAI proxy) */
+async function fetchOpenAITTSClip(text, voice) {
+  const res = await fetch(`${WORKER_URL}/tts-openai`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice: voice || "onyx", model: "tts-1" }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err?.error || `OpenAI TTS error ${res.status}`);
+  }
+  return await res.arrayBuffer();
+}
+
+/** Generate podcast MP3 with OpenAI voices (onyx=ALEX, alloy=MORGAN) */
+async function generatePodcastMp3OpenAI(scriptText, onProgress) {
+  const segments = parsePodcastSegments(scriptText);
+  if (segments.length === 0) throw new Error("No dialogue found in script");
+
+  const audioBuffers = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (onProgress) onProgress(`Rendering ${seg.speaker} (${i + 1}/${segments.length})...`);
+    const voice = seg.speaker === "MORGAN" ? "alloy" : "onyx";
+    const buffer = await fetchOpenAITTSClip(seg.text, voice);
+    audioBuffers.push(buffer);
+  }
+  return concatAudioBuffers(audioBuffers);
+}
+
+/** Generate single-voice MP3 via OpenAI */
+async function generateSingleVoiceMp3OpenAI(scriptText, format) {
+  const cleaned = cleanScriptForTTS(scriptText, format);
+  const buffer = await fetchOpenAITTSClip(cleaned, "onyx");
+  return new Blob([buffer], { type: "audio/mpeg" });
+}
+
+async function exportToMp3OpenAI(scriptText, format, onProgress) {
+  let blob;
+  if (format === "podcast") {
+    blob = await generatePodcastMp3OpenAI(scriptText, onProgress);
+  } else {
+    blob = await generateSingleVoiceMp3OpenAI(scriptText, format);
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${format}-narration.mp3`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 /* ─── UI Components ───────────────────────────────────────────────────────── */
 
 function Ticker() {
@@ -803,6 +857,63 @@ function ExportMp3Button({ output, format, meta, onExportDone }) {
   );
 }
 
+/* ─── Export MP3 Button — OpenAI ──────────────────────────────────────────── */
+
+function ExportMp3ButtonOpenAI({ output, format, meta }) {
+  const [exportStatus, setExportStatus] = useState("idle");
+  const [exportError, setExportError] = useState("");
+  const [exportMsg, setExportMsg] = useState("");
+
+  const cleaned = cleanScriptForTTS(output, format);
+  const charCount = cleaned.length;
+  const estCost = (charCount / 1000 * 0.015).toFixed(3);
+
+  const handleExport = async () => {
+    setExportStatus("exporting");
+    setExportError(""); setExportMsg("");
+    try {
+      await exportToMp3OpenAI(output, format, (msg) => setExportMsg(msg));
+      setExportStatus("done");
+      setTimeout(() => setExportStatus("idle"), 3000);
+    } catch (err) {
+      setExportStatus("error");
+      setExportError(err.message);
+    }
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <button
+          onClick={handleExport}
+          disabled={exportStatus === "exporting"}
+          title="Export as MP3 via OpenAI TTS"
+          style={{
+            ...btnS("#10a37f", exportStatus === "idle"),
+            opacity: exportStatus === "exporting" ? 0.5 : 1,
+            cursor: exportStatus === "exporting" ? "not-allowed" : "pointer",
+          }}
+        >
+          {exportStatus === "exporting" && (
+            <span style={{ display: "inline-block", animation: "blink 1s ease-in-out infinite" }}>🔊 {exportMsg || "Rendering audio..."}</span>
+          )}
+          {exportStatus === "done" && "✓ Downloaded"}
+          {exportStatus === "error" && "⚠ Retry"}
+          {exportStatus === "idle" && "🔊 Export MP3 (OpenAI)"}
+        </button>
+        <span style={{ fontSize: 13, color: "#aaa", fontFamily: BRAND.monoFont }}>
+          ~${estCost}
+        </span>
+      </div>
+      {exportStatus === "error" && exportError && (
+        <div style={{ fontSize: 14, color: "#10a37f", fontFamily: BRAND.monoFont, marginTop: 6 }}>
+          OpenAI error: {exportError}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── Main App ────────────────────────────────────────────────────────────── */
 
 export default function PageCast() {
@@ -1050,6 +1161,7 @@ export default function PageCast() {
               <button onClick={copy}     style={btnS(meta.color)}>{copied ? "✓ Copied" : "⎘ Copy"}</button>
               <button onClick={download} style={btnS(meta.color)}>↓ Download</button>
               <ExportMp3Button output={output} format={format} meta={meta} onExportDone={refreshBalance} />
+              <ExportMp3ButtonOpenAI output={output} format={format} meta={meta} />
               <button onClick={()=>{setPhase("idle");setOutput("");setError("");setSourceWordCount(0);}} style={btnS("#282828")}>↺ New</button>
             </div>
             <CreditBalance balance={elBalance} error={elError} />

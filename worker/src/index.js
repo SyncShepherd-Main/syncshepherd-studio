@@ -6,10 +6,12 @@
      GET  /?url=<url>[&links=true]   — Fetch & clean a public URL
      POST /generate                  — Proxy to Anthropic Messages API
      POST /tts                       — Proxy to ElevenLabs TTS API
+     POST /tts-openai                — Proxy to OpenAI TTS API
 
    Secrets (set via `wrangler secret put`):
      ANTHROPIC_API_KEY
      ELEVENLABS_API_KEY
+     OPENAI_API_KEY
 ───────────────────────────────────────────────────────────────────────────── */
 
 const MAX_TEXT_LENGTH = 15000;
@@ -38,6 +40,11 @@ export default {
     // Route: POST /tts — ElevenLabs TTS proxy
     if (request.method === "POST" && path === "/tts") {
       return handleTTS(request, env);
+    }
+
+    // Route: POST /tts-openai — OpenAI TTS proxy
+    if (request.method === "POST" && path === "/tts-openai") {
+      return handleTTSOpenAI(request, env);
     }
 
     // Route: GET /subscription — ElevenLabs subscription/usage info
@@ -148,6 +155,56 @@ async function handleTTS(request, env) {
     });
   } catch (err) {
     return jsonResponse({ error: `ElevenLabs proxy error: ${err.message}` }, 500);
+  }
+}
+
+/* ─── /tts-openai — OpenAI TTS Proxy ──────────────────────────────────────── */
+
+async function handleTTSOpenAI(request, env) {
+  if (!env.OPENAI_API_KEY) {
+    return jsonResponse({ error: "OPENAI_API_KEY not configured on worker" }, 500);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON body" }, 400);
+  }
+
+  const { text, voice, model } = body;
+  if (!text) {
+    return jsonResponse({ error: "Missing text" }, 400);
+  }
+
+  try {
+    const res = await fetch("https://api.openai.com/v1/audio/speech", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model || "tts-1",
+        input: text,
+        voice: voice || "onyx",
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: { message: `HTTP ${res.status}` } }));
+      return jsonResponse({ error: err?.error?.message || `OpenAI TTS error ${res.status}` }, res.status);
+    }
+
+    return new Response(res.body, {
+      status: 200,
+      headers: {
+        "Content-Type": "audio/mpeg",
+        ...CORS_HEADERS,
+      },
+    });
+  } catch (err) {
+    return jsonResponse({ error: `OpenAI TTS proxy error: ${err.message}` }, 500);
   }
 }
 
