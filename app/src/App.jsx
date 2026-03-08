@@ -7,11 +7,11 @@ import { useState, useRef, useEffect, useCallback } from "react";
 ───────────────────────────────────────────────────────────────────────────── */
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || "http://localhost:8787";
-const ANTHROPIC_API_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY || "";
-const ELEVENLABS_API_KEY = import.meta.env.VITE_ELEVENLABS_API_KEY || "";
-const ELEVENLABS_VOICE_ID = import.meta.env.VITE_ELEVENLABS_VOICE_ID || "";
-const ELEVENLABS_VOICE_ID_ALEX = import.meta.env.VITE_ELEVENLABS_VOICE_ID_ALEX || import.meta.env.VITE_ELEVENLABS_VOICE_ID || "";
-const ELEVENLABS_VOICE_ID_MORGAN = import.meta.env.VITE_ELEVENLABS_VOICE_ID_MORGAN || "XrExE9yKIg1WjnnlVkGX"; // Matilda
+
+/* Voice IDs — these are NOT secrets (just identifiers), keys stay on the Worker */
+const VOICE_ID_ALEX = "pNInz6obpgDQGcFmaJgB";    // Adam
+const VOICE_ID_MORGAN = "XrExE9yKIg1WjnnlVkGX";  // Matilda
+const VOICE_ID_DEFAULT = VOICE_ID_ALEX;
 
 const FORMAT_META = {
   video: {
@@ -115,17 +115,9 @@ async function fetchViaWorkerWithLinks(url) {
 }
 
 async function generateScript(text, format, isMultiPage = false) {
-  if (!ANTHROPIC_API_KEY) {
-    throw new Error("Anthropic API key not configured — set VITE_ANTHROPIC_API_KEY in .env");
-  }
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
+  const res = await fetch(`${WORKER_URL}/generate`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
       max_tokens: 4000,
@@ -137,12 +129,11 @@ async function generateScript(text, format, isMultiPage = false) {
     })
   });
 
+  const data = await res.json();
   if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err?.error?.message || `API error ${res.status}`);
+    throw new Error(data?.error || `API error ${res.status}`);
   }
 
-  const data = await res.json();
   const output = data.content?.filter(b => b.type === "text").map(b => b.text).join("\n");
   if (!output || output.length < 100) throw new Error("No script was generated. The page may be empty or inaccessible.");
   return output;
@@ -206,24 +197,21 @@ function parsePodcastSegments(scriptText) {
   return segments;
 }
 
-/** Fetch a single TTS clip from ElevenLabs */
+/** Fetch a single TTS clip via Worker (ElevenLabs proxy) */
 async function fetchTTSClip(text, voiceId) {
-  const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+  const res = await fetch(`${WORKER_URL}/tts`, {
     method: "POST",
-    headers: {
-      "xi-api-key": ELEVENLABS_API_KEY,
-      "Content-Type": "application/json",
-      "Accept": "audio/mpeg",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       text,
+      voice_id: voiceId,
       model_id: "eleven_turbo_v2",
       voice_settings: { stability: 0.5, similarity_boost: 0.75 },
     }),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: { message: `HTTP ${res.status}` } }));
-    throw new Error(err?.detail?.message || err?.detail || `ElevenLabs error ${res.status}`);
+    const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+    throw new Error(err?.error || `ElevenLabs error ${res.status}`);
   }
   return await res.arrayBuffer();
 }
@@ -252,7 +240,7 @@ async function generatePodcastMp3(scriptText, onProgress) {
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     if (onProgress) onProgress(`Rendering ${seg.speaker} (${i + 1}/${segments.length})...`);
-    const voiceId = seg.speaker === "MORGAN" ? ELEVENLABS_VOICE_ID_MORGAN : ELEVENLABS_VOICE_ID_ALEX;
+    const voiceId = seg.speaker === "MORGAN" ? VOICE_ID_MORGAN : VOICE_ID_ALEX;
     const buffer = await fetchTTSClip(seg.text, voiceId);
     audioBuffers.push(buffer);
   }
@@ -263,7 +251,7 @@ async function generatePodcastMp3(scriptText, onProgress) {
 /** Generate single-voice MP3 for video/tts formats */
 async function generateSingleVoiceMp3(scriptText, format) {
   const cleaned = cleanScriptForTTS(scriptText, format);
-  const buffer = await fetchTTSClip(cleaned, ELEVENLABS_VOICE_ID);
+  const buffer = await fetchTTSClip(cleaned, VOICE_ID_DEFAULT);
   return new Blob([buffer], { type: "audio/mpeg" });
 }
 
@@ -482,12 +470,7 @@ function AudioPlayer({ script, format }) {
       setPlaying(true); setPaused(false);
       return;
     }
-    if (!ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
-      // Fall back to browser speech
-      playBrowser();
-      return;
-    }
-    // Generate MP3 via ElevenLabs (multi-voice for podcast)
+    // Generate MP3 via Worker → ElevenLabs (multi-voice for podcast)
     setMp3Loading(true); setMp3Error(""); setLoadingMsg("Preparing audio...");
     try {
       const blob = await generateMp3Blob(script, format, (msg) => setLoadingMsg(msg));
@@ -524,8 +507,6 @@ function AudioPlayer({ script, format }) {
 
   const bars = [26,16,30,12,24,18,28,14,22,20];
   const mins = Math.max(1, Math.round(wc.current / (speed * 145)));
-  const hasElevenLabs = ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID;
-
   return (
     <div style={{ background:"#0a0a0a", border:`1px solid ${meta.color}35`, borderRadius:12, padding:"18px 22px", marginBottom:20 }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:14 }}>
@@ -544,12 +525,6 @@ function AudioPlayer({ script, format }) {
             onChange={e => { setSpeed(+e.target.value); if (playing||paused) stop_(); }}
             style={{ width:72, accentColor:meta.color }} />
           <span style={{ fontSize:11, color:meta.color, fontFamily:"monospace", width:28 }}>{speed.toFixed(1)}×</span>
-          {!hasElevenLabs && (
-            <select value={voice?.name||""} onChange={e=>setVoice(voices.find(v=>v.name===e.target.value))}
-              style={{ background:"#111", border:"1px solid #222", borderRadius:6, color:"#666", fontSize:11, padding:"3px 6px", maxWidth:130, fontFamily:"monospace" }}>
-              {voices.map(v=><option key={v.name}>{v.name}</option>)}
-            </select>
-          )}
         </div>
       </div>
       <div style={{ height:3, background:"#181818", borderRadius:2, marginBottom:14, overflow:"hidden" }}>
@@ -562,9 +537,7 @@ function AudioPlayer({ script, format }) {
             ? <button onClick={resume_} style={btnS(meta.color)}>▶ Resume</button>
             : mp3Loading
               ? <button disabled style={{...btnS(meta.color), opacity:0.5, cursor:"wait"}}>{loadingMsg || "Loading AI voice..."}</button>
-              : <button onClick={playMp3InBrowser} style={btnS(meta.color, true)}>
-                  {hasElevenLabs ? "▶ Play (AI Voice)" : "▶ Play Audio"}
-                </button>}
+              : <button onClick={playMp3InBrowser} style={btnS(meta.color, true)}>▶ Play (AI Voice)</button>}
         <button onClick={stop_} style={btnS("#2a2a2a")}>⏹</button>
         {mp3Url && <span style={{ fontSize:10, color:"#2a6", fontFamily:"monospace" }}>{format === "podcast" ? "● Dual-voice loaded" : "● AI voice loaded"}</span>}
         <span style={{ flex:1 }} />
@@ -702,19 +675,17 @@ function ExportMp3Button({ output, format, meta }) {
     }
   };
 
-  const noKey = !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID;
-
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button
           onClick={handleExport}
-          disabled={noKey || exportStatus === "exporting"}
-          title={noKey ? "Add VITE_ELEVENLABS_API_KEY and VITE_ELEVENLABS_VOICE_ID to .env to enable MP3 export" : "Export as MP3 via ElevenLabs"}
+          disabled={exportStatus === "exporting"}
+          title="Export as MP3 via ElevenLabs"
           style={{
             ...btnS(meta.color, exportStatus === "idle"),
-            opacity: noKey ? 0.35 : 1,
-            cursor: noKey || exportStatus === "exporting" ? "not-allowed" : "pointer",
+            opacity: exportStatus === "exporting" ? 0.5 : 1,
+            cursor: exportStatus === "exporting" ? "not-allowed" : "pointer",
             position: "relative",
           }}
         >
