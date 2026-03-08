@@ -47,6 +47,13 @@ const FORMAT_META = {
     color: "#34b899",
     glow: "rgba(52,184,153,0.35)",
     desc: "Audio-optimised spoken-word prose"
+  },
+  story: {
+    label: "📖 Tell the Story",
+    tag: "STORY",
+    color: "#9b59b6",
+    glow: "rgba(155,89,182,0.35)",
+    desc: "Compelling narrative prose from any content"
   }
 };
 
@@ -99,7 +106,21 @@ FORMAT: TTS BROADCAST NARRATION
 - Every point from the source covered in full — this is not a summary
 - Structure: vivid INTRO → full BODY with transitions → emphasis on key data → resonant CONCLUSION
 - Tone: trusted public radio presenter — warm, authoritative, unhurried
-- 1000–1500 words`
+- 1000–1500 words`,
+
+    story: `You are an expert Content Strategist and Narrative Designer. Transform the provided web content into a compelling, linear narrative that captures the essence of the source material.${multiPageNote}
+
+FORMAT: STORY NARRATIVE
+- Analyse the content, identify the core message and narrative arc
+- Write a cohesive story-style narrative — professional yet engaging
+- Proportional in length to the source material
+- No multi-voice dialogue, no podcast back-and-forth
+- No visual cues, stage directions, or scene markers
+- No bullet points, no markdown headers in the output
+- Pure singular narrative prose only
+- Natural paragraph breaks for readability
+- Strong opening hook, developed middle, resonant conclusion
+- 800–1400 words`
   };
 
   return formats[format];
