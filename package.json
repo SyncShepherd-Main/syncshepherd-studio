@@ -1,0 +1,15 @@
+{
+  "name": "syncshepherd-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PageCast — URL to Broadcast Engine by SyncShepherd Digital Solutions",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:worker\" \"npm run dev:app\"",
+    "dev:worker": "cd worker && npm run dev",
+    "dev:app": "cd app && npm run dev",
+    "install:all": "cd worker && npm install && cd ../app && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
