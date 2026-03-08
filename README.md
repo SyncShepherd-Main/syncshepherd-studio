@@ -1,25 +1,60 @@
 # SyncShepherd Studio — PageCast
 
-**URL → Broadcast Engine** by SyncShepherd Digital Solutions
+**URL to Broadcast Engine** by SyncShepherd Digital Solutions
 
-🔗 [GitHub Repository](https://github.com/SyncShepherd-Main/syncshepherd-studio)
+## Live URLs
 
-PageCast transforms any public URL into production-ready media scripts: video scripts with visual cues, dual-host podcast episodes, or TTS-optimised narration. Powered by Claude AI with ElevenLabs MP3 export.
+| Service | URL |
+|---------|-----|
+| App (Cloudflare Pages) | https://pagecast-a6g.pages.dev |
+| Worker (Cloudflare Workers) | https://pagecast-fetcher.syncshepherd.workers.dev |
+| GitHub Repo | https://github.com/SyncShepherd-Main/syncshepherd-studio |
+
+Access is restricted via Cloudflare Zero Trust (Access policy on the Pages domain).
+
+## What It Does
+
+PageCast takes any public URL (or pages from the Gary's Garden repo) and generates broadcast-ready media scripts using Claude AI:
+
+- **Video Script** — scene-by-scene with visual cues, B-roll notes, on-screen text
+- **Dual-Host Podcast** — ALEX + MORGAN dialogue with stage directions
+- **TTS Narration** — spoken-word prose optimized for audio
+
+Scripts can be copied, downloaded as .txt, played via browser speech synthesis, or exported as MP3 via ElevenLabs (uses API credits).
 
 ## Architecture
 
 ```
-┌──────────────┐     ┌─────────────────────┐     ┌──────────────┐
-│  React App   │────▶│  Cloudflare Worker   │────▶│  Target URL  │
-│  (Vite)      │     │  (pagecast-fetcher)  │     │  (any site)  │
-│  port 5173   │     │  port 8787           │     └──────────────┘
-└──────┬───────┘     └─────────────────────┘
-       │
-       ├──▶ Anthropic API (script generation)
-       └──▶ ElevenLabs API (MP3 export)
+Browser (React/Vite)
+    |
+    |--- GET /?url=<url>       --> Worker fetches & cleans page
+    |--- GET /?url=<url>&links --> Worker fetches page + discovers internal links
+    |--- POST /generate        --> Worker proxies to Anthropic Messages API
+    |--- POST /tts             --> Worker proxies to ElevenLabs TTS API
+    |
+Cloudflare Worker (pagecast-fetcher)
+    |--- API keys stored as Worker Secrets (never exposed to browser)
+    |--- ANTHROPIC_API_KEY
+    |--- ELEVENLABS_API_KEY
 ```
 
-## Quick Start
+**Key design:** All API keys live on the Worker as secrets. The React app only knows the Worker URL — it never touches Anthropic or ElevenLabs directly.
+
+## Branding
+
+Uses SyncShepherd brand identity:
+- **Primary Blue:** #0f70b7
+- **Accent Gold:** #eeaf00
+- **Dark Navy:** #192534
+- **Fonts:** Heebo (headings), Roboto (body), Roboto Mono (code/labels)
+
+## Local Development
+
+### Prerequisites
+
+- Node.js 18+
+- npm
+- Cloudflare account (for Worker)
 
 ### 1. Install dependencies
 
@@ -27,53 +62,90 @@ PageCast transforms any public URL into production-ready media scripts: video sc
 npm run install:all
 ```
 
-### 2. Configure environment
+### 2. Configure Worker secrets (local dev)
+
+Create `worker/.dev.vars`:
+
+```
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+ELEVENLABS_API_KEY=your-elevenlabs-key
+```
+
+### 3. Configure app environment
 
 ```bash
 cp app/.env.example app/.env
 ```
 
-Edit `app/.env`:
-
-```env
+`app/.env` for local dev:
+```
 VITE_WORKER_URL=http://localhost:8787
-VITE_ANTHROPIC_API_KEY=sk-ant-your-key-here
-VITE_ELEVENLABS_API_KEY=your-elevenlabs-key      # optional
-VITE_ELEVENLABS_VOICE_ID=your-voice-id           # optional
 ```
 
-### 3. Run locally
+For production builds:
+```
+VITE_WORKER_URL=https://pagecast-fetcher.syncshepherd.workers.dev
+```
+
+### 4. Run locally
 
 ```bash
 npm run dev
 ```
 
-This starts both the Cloudflare Worker (localhost:8787) and the Vite dev server (localhost:5173) concurrently.
+Starts both servers concurrently:
+- Vite dev server: http://localhost:5173
+- Worker (Miniflare): http://localhost:8787
 
-Or run them separately:
-
+Or run separately:
 ```bash
 npm run dev:worker   # Worker on :8787
 npm run dev:app      # React app on :5173
 ```
 
-## Features
+## Deployment
 
-| Feature | Status |
-|---------|--------|
-| Three output formats (Video, Podcast, TTS) | Done |
-| Cloudflare Worker fetch proxy | Done |
-| Gary's Garden repo browser | Done |
-| Multi-page crawl (up to 10 links) | Done |
-| ElevenLabs MP3 export | Done |
-| Browser SpeechSynthesis audio player | Done |
-| Copy + Download script export | Done |
+### Deploy the Worker
 
-## Worker API
+```bash
+cd worker
+npx wrangler login          # one-time browser OAuth
+npx wrangler deploy
+```
 
-**Endpoint:** `GET /?url=<encoded-url>`
+Set secrets (one-time, or when keys change):
+```bash
+npx wrangler secret put ANTHROPIC_API_KEY
+npx wrangler secret put ELEVENLABS_API_KEY
+```
 
-Returns:
+### Deploy the App (Cloudflare Pages)
+
+```bash
+cd app
+
+# Set production Worker URL in .env
+echo "VITE_WORKER_URL=https://pagecast-fetcher.syncshepherd.workers.dev" > .env
+
+# Build and deploy
+npx vite build
+npx wrangler pages deploy dist --project-name pagecast
+```
+
+### Access Control (Cloudflare Zero Trust)
+
+The app is locked down via Cloudflare Access:
+
+1. Go to https://one.dash.cloudflare.com -> Access -> Applications
+2. Application: `pagecast-a6g.pages.dev`
+3. Policy: Allow — Emails — (your email only)
+
+## Worker API Reference
+
+### GET /?url=\<encoded-url\>
+
+Fetches a public URL, strips HTML to clean text.
+
 ```json
 {
   "url": "https://example.com/page",
@@ -83,54 +155,111 @@ Returns:
 }
 ```
 
-**With link discovery:** `GET /?url=<encoded-url>&links=true`
+### GET /?url=\<encoded-url\>&links=true
 
-Adds `links[]` array of up to 10 internal URLs found on the page.
+Same as above, plus discovers up to 10 internal links:
 
-## Deploying the Worker
-
-```bash
-cd worker
-npx wrangler deploy
+```json
+{
+  "url": "...",
+  "text": "...",
+  "wordCount": 1234,
+  "links": ["https://example.com/page-2", "..."]
+}
 ```
 
-Then update `VITE_WORKER_URL` in `app/.env` to your deployed Worker URL:
+### POST /generate
+
+Proxies to Anthropic Messages API. Body:
+
+```json
+{
+  "model": "claude-sonnet-4-20250514",
+  "max_tokens": 4000,
+  "system": "System prompt...",
+  "messages": [{ "role": "user", "content": "..." }]
+}
 ```
-VITE_WORKER_URL=https://pagecast-fetcher.<account>.workers.dev
+
+### POST /tts
+
+Proxies to ElevenLabs TTS API. Returns `audio/mpeg` stream. Body:
+
+```json
+{
+  "text": "Text to speak",
+  "voice_id": "pNInz6obpgDQGcFmaJgB",
+  "model_id": "eleven_turbo_v2",
+  "voice_settings": { "stability": 0.5, "similarity_boost": 0.75 }
+}
 ```
 
-## ElevenLabs MP3 Export
+## ElevenLabs Voice Setup
 
-To enable MP3 export:
+Voices are hardcoded in the app:
+- **ALEX** (Adam): `pNInz6obpgDQGcFmaJgB`
+- **MORGAN** (Matilda): `XrExE9yKIg1WjnnlVkGX`
 
-1. Go to [ElevenLabs Voice Library](https://elevenlabs.io/app/voice-library)
-2. Choose a voice (recommended: Adam, Callum, or Charlotte)
-3. Copy the Voice ID from the voice settings
-4. Add to `app/.env`:
-   ```
-   VITE_ELEVENLABS_API_KEY=your-api-key
-   VITE_ELEVENLABS_VOICE_ID=the-voice-id
-   ```
+Podcast format uses both voices (dual-voice). Video and TTS use ALEX only.
 
-**Credit budget:** AI Suite 40K plan = 40,000 chars/month. A typical 1,200-word podcast script is ~7,500 characters (~5 exports/month). The app shows character count before each export.
+**Credit budget:** A typical 1,200-word podcast script is ~7,500 characters. The app shows character count before each MP3 export.
+
+**What costs ElevenLabs credits:**
+- "Play (AI Voice)" button
+- "Export MP3" button
+
+**What does NOT cost credits:**
+- Fetching pages (Worker only)
+- Generating scripts (Anthropic API, separate billing)
+- Copy/Download text
+- Browser SpeechSynthesis playback (free, uses computer voices)
+
+## Features
+
+| Feature | Status |
+|---------|--------|
+| Cloudflare Worker fetch proxy | Deployed |
+| Anthropic API proxy (keys on Worker) | Deployed |
+| ElevenLabs TTS proxy (keys on Worker) | Deployed |
+| Three output formats (Video, Podcast, TTS) | Done |
+| Gary's Garden repo browser | Done |
+| Multi-page crawl (up to 10 links) | Done |
+| Dual-voice podcast MP3 (ALEX + MORGAN) | Done |
+| Single-voice MP3 export | Done |
+| Browser SpeechSynthesis fallback | Done |
+| Copy + Download script export | Done |
+| SyncShepherd branding | Done |
+| Cloudflare Pages deployment | Done |
+| Cloudflare Access (Zero Trust) | Needs setup |
 
 ## Project Structure
 
 ```
 syncshepherd-studio/
-├── worker/                 # Cloudflare Worker (fetch proxy)
-│   ├── src/index.js
-│   ├── wrangler.toml
+├── worker/                    # Cloudflare Worker
+│   ├── src/index.js           #   Routes: GET /?url, POST /generate, POST /tts
+│   ├── .dev.vars              #   Local dev secrets (gitignored)
+│   ├── wrangler.toml          #   Worker config
 │   └── package.json
-├── app/                    # React app (Vite)
+├── app/                       # React app (Vite)
 │   ├── src/
-│   │   ├── main.jsx
-│   │   └── App.jsx         # PageCast main component
-│   ├── index.html
+│   │   ├── main.jsx           #   React entry point
+│   │   └── App.jsx            #   PageCast — all UI + logic (974 lines)
+│   ├── dist/                  #   Production build output (gitignored)
+│   ├── index.html             #   HTML shell + Google Fonts
 │   ├── vite.config.js
-│   ├── .env.example
+│   ├── .env                   #   VITE_WORKER_URL (gitignored)
+│   ├── .env.example           #   Template
 │   └── package.json
-├── package.json            # Root scripts (concurrently)
-├── ContentStudio.jsx       # Original Phase 1 artifact (reference)
+├── ContentStudio.jsx          # Original Phase 1 artifact (reference only)
+├── package.json               # Root scripts (concurrently)
+├── .gitignore
 └── README.md
 ```
+
+## Content Source
+
+Gary's Garden repo browser pulls from:
+https://github.com/syncshepherd-main/garys-garden
+
+Files are fetched via raw.githubusercontent.com through the Worker proxy.
