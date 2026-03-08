@@ -679,16 +679,39 @@ async function fetchElevenLabsBalance() {
 
 function useElevenLabsBalance() {
   const [balance, setBalance] = useState(null);
+  const [error, setError] = useState(null);
+  const [loaded, setLoaded] = useState(false);
   const refresh = useCallback(async () => {
-    const data = await fetchElevenLabsBalance();
-    if (data) setBalance(data);
+    try {
+      const res = await fetch(`${WORKER_URL}/subscription`);
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error);
+        setBalance(null);
+      } else {
+        setBalance(data);
+        setError(null);
+      }
+    } catch (err) {
+      setError(err.message);
+    }
+    setLoaded(true);
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
-  return { balance, refresh };
+  return { balance, error, loaded, refresh };
 }
 
-function CreditBalance({ balance }) {
-  if (!balance) return null;
+function CreditBalance({ balance, error }) {
+  if (error) return (
+    <div style={{ fontSize: 13, color: "#e0a030", fontFamily: BRAND.monoFont }}>
+      ElevenLabs: {error}
+    </div>
+  );
+  if (!balance) return (
+    <div style={{ fontSize: 13, color: "#556677", fontFamily: BRAND.monoFont }}>
+      Loading ElevenLabs balance...
+    </div>
+  );
   const { character_count, character_limit } = balance;
   const remaining = character_limit - character_count;
   const pct = remaining / character_limit;
@@ -773,7 +796,7 @@ export default function PageCast() {
   const [selectedPages, setSelectedPages] = useState([]);
   const [crawlLinks, setCrawlLinks]     = useState(false);
   const [sourceWordCount, setSourceWordCount] = useState(0);
-  const { balance: elBalance, refresh: refreshBalance } = useElevenLabsBalance();
+  const { balance: elBalance, error: elError, refresh: refreshBalance } = useElevenLabsBalance();
   const outputRef = useRef(null);
   const meta = FORMAT_META[format];
   const busy = phase === "running";
@@ -963,7 +986,7 @@ export default function PageCast() {
 
         {/* ElevenLabs credit balance — always visible */}
         <div style={{ textAlign:"right", marginBottom:6 }}>
-          <CreditBalance balance={elBalance} />
+          <CreditBalance balance={elBalance} error={elError} />
         </div>
 
         {/* progress bar */}
@@ -1008,7 +1031,7 @@ export default function PageCast() {
               <ExportMp3Button output={output} format={format} meta={meta} onExportDone={refreshBalance} />
               <button onClick={()=>{setPhase("idle");setOutput("");setError("");setSourceWordCount(0);}} style={btnS("#282828")}>↺ New</button>
             </div>
-            <CreditBalance balance={elBalance} />
+            <CreditBalance balance={elBalance} error={elError} />
           </div>
 
           {/* audio player (podcast + tts only) */}
