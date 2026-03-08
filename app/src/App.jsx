@@ -30,6 +30,7 @@ const OPENAI_VOICES = {
   coral:   { label: "Coral",   desc: "Warm, natural" },
   sage:    { label: "Sage",    desc: "Calm, wise" },
   ballad:  { label: "Ballad",  desc: "Smooth, melodic" },
+  verse:   { label: "Verse",   desc: "Versatile, dynamic" },
 };
 
 /* Vibe presets — injected into system prompt */
@@ -1244,6 +1245,11 @@ export default function PageCast() {
           </div>
         </div>
 
+        {/* Voice engine + voice selection */}
+        <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} output={null} format={format}
+          openaiVoice1={openaiVoice1} setOpenaiVoice1={setOpenaiVoice1} openaiVoice2={openaiVoice2} setOpenaiVoice2={setOpenaiVoice2}
+          elevenVoice1={elevenVoice1} setElevenVoice1={setElevenVoice1} elevenVoice2={elevenVoice2} setElevenVoice2={setElevenVoice2} />
+
         {/* Generate button */}
         <button onClick={run} disabled={busy} style={{
           width:"100%", padding:"18px", borderRadius:11, border:"none",
@@ -1252,15 +1258,10 @@ export default function PageCast() {
           cursor: busy ? "not-allowed" : "pointer", letterSpacing:"0.1em",
           fontFamily:BRAND.headingFont, textTransform:"uppercase",
           transition:"all 0.2s", boxShadow: busy ? "none" : `0 0 30px ${meta.glow}`,
-          marginBottom:10
+          marginBottom:10, marginTop:16
         }}>
           {busy ? `● ${statusMsg}` : `▶  GENERATE ${meta.tag}`}
         </button>
-
-        {/* ElevenLabs credit balance — always visible */}
-        <div style={{ textAlign:"right", marginBottom:6 }}>
-          <CreditBalance balance={elBalance} error={elError} />
-        </div>
 
         {/* progress bar */}
         {busy && (
