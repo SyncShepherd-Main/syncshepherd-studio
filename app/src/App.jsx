@@ -569,7 +569,7 @@ const btnS = (color, primary=false) => ({
   letterSpacing:"0.05em", fontWeight: primary ? 700 : 400, transition:"all 0.15s"
 });
 
-/* ─── Gary's Garden Repo Browser (Task 3) ─────────────────────────────────── */
+/* ─── Repo Browser (Task 3) ───────────────────────────────────────────────── */
 
 function RepoFilePicker({ selectedPages, setSelectedPages }) {
   const [repoFiles, setRepoFiles] = useState([]);
@@ -642,7 +642,7 @@ function RepoFilePicker({ selectedPages, setSelectedPages }) {
 function InputModeTabs({ inputMode, setInputMode, color }) {
   const tabs = [
     { id: "url", label: "Enter URL" },
-    { id: "repo", label: "Gary's Garden 🌱" },
+    { id: "repo", label: "Content Library" },
   ];
   return (
     <div style={{ display: "flex", gap: 0, marginBottom: 14 }}>
@@ -756,7 +756,7 @@ export default function PageCast() {
       let isMultiPage = false;
 
       if (inputMode === "repo") {
-        // Gary's Garden mode — fetch each selected page via raw.githubusercontent.com
+        // Content Library mode — fetch each selected page via raw.githubusercontent.com
         const total = selectedPages.length;
         isMultiPage = total > 1;
         for (let i = 0; i < total; i++) {
@@ -846,7 +846,7 @@ export default function PageCast() {
           <span style={{ color:BRAND.blue, transition:"color 0.3s" }}>Cast</span>
         </h1>
         <p style={{ fontSize:17, color:"#bcc8d4", maxWidth:500, margin:"16px auto 0", lineHeight:1.7, fontFamily:BRAND.bodyFont }}>
-          Paste any public URL or select from Gary's Garden. The Worker fetches the full page server-side — no browser limits, no CORS, no proxies.
+          Paste any public URL or browse your Content Library. The Worker fetches the full page server-side — no browser limits, no CORS, no proxies.
         </p>
       </div>
 

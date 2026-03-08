@@ -14,7 +14,7 @@ Access is restricted via Cloudflare Zero Trust (Access policy on the Pages domai
 
 ## What It Does
 
-PageCast takes any public URL (or pages from the Gary's Garden repo) and generates broadcast-ready media scripts using Claude AI:
+PageCast takes any public URL (or pages from your Content Library) and generates broadcast-ready media scripts using Claude AI:
 
 - **Video Script** — scene-by-scene with visual cues, B-roll notes, on-screen text
 - **Dual-Host Podcast** — ALEX + MORGAN dialogue with stage directions
@@ -222,7 +222,7 @@ Podcast format uses both voices (dual-voice). Video and TTS use ALEX only.
 | Anthropic API proxy (keys on Worker) | Deployed |
 | ElevenLabs TTS proxy (keys on Worker) | Deployed |
 | Three output formats (Video, Podcast, TTS) | Done |
-| Gary's Garden repo browser | Done |
+| Content Library browser | Done |
 | Multi-page crawl (up to 10 links) | Done |
 | Dual-voice podcast MP3 (ALEX + MORGAN) | Done |
 | Single-voice MP3 export | Done |
@@ -257,9 +257,6 @@ syncshepherd-studio/
 └── README.md
 ```
 
-## Content Source
+## Content Library
 
-Gary's Garden repo browser pulls from:
-https://github.com/syncshepherd-main/garys-garden
-
-Files are fetched via raw.githubusercontent.com through the Worker proxy.
+The Content Library tab browses a connected GitHub repo and fetches files via raw.githubusercontent.com through the Worker proxy. The repo URL is configured in `App.jsx` (`RepoFilePicker` component).
