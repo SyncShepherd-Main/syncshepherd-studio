@@ -453,7 +453,7 @@ function ScriptBlock({ content, format }) {
   );
 }
 
-function AudioPlayer({ script, format }) {
+function AudioPlayer({ script, format, voiceEngine }) {
   const [playing, setPlaying] = useState(false);
   const [paused, setPaused]   = useState(false);
   const [speed, setSpeed]     = useState(1);
@@ -461,7 +461,11 @@ function AudioPlayer({ script, format }) {
   const [mp3Url, setMp3Url]   = useState(null);
   const [mp3Loading, setMp3Loading] = useState(false);
   const [mp3Error, setMp3Error] = useState("");
+  const [loadingMsg, setLoadingMsg] = useState("");
   const audioRef = useRef(null);
+  const chunksRef = useRef([]);
+  const chunkIndexRef = useRef(0);
+  const lastEngineRef = useRef(null);
   const meta = FORMAT_META[format];
 
   const clean = format === "podcast"
@@ -470,13 +474,25 @@ function AudioPlayer({ script, format }) {
 
   const wc = useRef(clean.split(/\s+/).length);
 
+  // Reset cached audio when engine changes
+  useEffect(() => {
+    if (lastEngineRef.current && lastEngineRef.current !== voiceEngine) {
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+      speechSynthesis.cancel();
+      setMp3Url(null);
+      setPlaying(false); setPaused(false); setPct(0); setMp3Error("");
+    }
+    lastEngineRef.current = voiceEngine;
+  }, [voiceEngine]);
+
   useEffect(() => {
     return () => {
       if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+      speechSynthesis.cancel();
     };
   },[]);
 
-  // Track MP3 playback progress
+  // Track MP3 playback progress (for openai / elevenlabs)
   useEffect(() => {
     if (!mp3Url || !audioRef.current) return;
     const audio = audioRef.current;
@@ -487,18 +503,67 @@ function AudioPlayer({ script, format }) {
     return () => { audio.removeEventListener("timeupdate", onTime); audio.removeEventListener("ended", onEnd); };
   }, [mp3Url]);
 
-  const [loadingMsg, setLoadingMsg] = useState("");
+  // ── Browser SpeechSynthesis helpers ──
+  const [browserVoice, setBrowserVoice] = useState(null);
 
-  /** Generate MP3 blob via OpenAI TTS */
-  const generateOpenAIMp3 = async (onProgress) => {
-    if (format === "podcast") {
-      return await generatePodcastMp3OpenAI(script, onProgress);
-    } else {
-      return await generateSingleVoiceMp3OpenAI(script, format);
+  useEffect(() => {
+    const load = () => {
+      const v = speechSynthesis.getVoices().filter(v => v.lang.startsWith("en"));
+      const best = v.find(x => /google|samantha|daniel|karen|moira/i.test(x.name)) || v[0];
+      if (best) setBrowserVoice(best);
+    };
+    load();
+    speechSynthesis.onvoiceschanged = load;
+  },[]);
+
+  const getChunks = useCallback(() => {
+    const sentences = clean.split(/(?<=[.!?])\s+/);
+    const chunks = [];
+    let current = "";
+    for (const s of sentences) {
+      if ((current + " " + s).split(/\s+/).length > 150 && current) {
+        chunks.push(current.trim());
+        current = s;
+      } else {
+        current = current ? current + " " + s : s;
+      }
     }
-  };
+    if (current.trim()) chunks.push(current.trim());
+    return chunks;
+  }, [clean]);
 
-  const playMp3InBrowser = async () => {
+  const speakChunk = useCallback((index) => {
+    const chunks = chunksRef.current;
+    if (index >= chunks.length) {
+      setPlaying(false); setPaused(false); setPct(100);
+      return;
+    }
+    const u = new SpeechSynthesisUtterance(chunks[index]);
+    if (browserVoice) u.voice = browserVoice;
+    u.rate = speed;
+    u.onboundary = () => {
+      const wordsBeforeChunk = chunks.slice(0, index).join(" ").split(/\s+/).filter(Boolean).length;
+      const progress = (wordsBeforeChunk + chunks[index].slice(0, 50).split(/\s+/).length) / wc.current * 100;
+      setPct(Math.min(progress, 99));
+    };
+    u.onend = () => {
+      chunkIndexRef.current = index + 1;
+      speakChunk(index + 1);
+    };
+    u.onerror = () => { setPlaying(false); setPaused(false); };
+    speechSynthesis.speak(u);
+  }, [browserVoice, speed]);
+
+  const playBrowserVoice = useCallback(() => {
+    speechSynthesis.cancel();
+    chunksRef.current = getChunks();
+    chunkIndexRef.current = 0;
+    speakChunk(0);
+    setPlaying(true); setPaused(false); setPct(0);
+  }, [getChunks, speakChunk]);
+
+  // ── AI voice (OpenAI / ElevenLabs) ──
+  const playAIVoice = async () => {
     if (mp3Url) {
       audioRef.current.currentTime = 0;
       audioRef.current.playbackRate = speed;
@@ -508,7 +573,14 @@ function AudioPlayer({ script, format }) {
     }
     setMp3Loading(true); setMp3Error(""); setLoadingMsg("Preparing audio...");
     try {
-      const blob = await generateOpenAIMp3((msg) => setLoadingMsg(msg));
+      let blob;
+      if (voiceEngine === "openai") {
+        blob = format === "podcast"
+          ? await generatePodcastMp3OpenAI(script, (msg) => setLoadingMsg(msg))
+          : await generateSingleVoiceMp3OpenAI(script, format);
+      } else {
+        blob = await generateMp3Blob(script, format, (msg) => setLoadingMsg(msg));
+      }
       const blobUrl = URL.createObjectURL(blob);
       setMp3Url(blobUrl);
       const audio = new Audio(blobUrl);
@@ -523,16 +595,25 @@ function AudioPlayer({ script, format }) {
     }
   };
 
+  // ── Unified play/pause/stop ──
+  const play_ = () => {
+    if (voiceEngine === "browser") { playBrowserVoice(); }
+    else { playAIVoice(); }
+  };
+
   const pause_ = () => {
-    if (audioRef.current) { audioRef.current.pause(); }
+    if (voiceEngine === "browser") { speechSynthesis.pause(); }
+    else if (audioRef.current) { audioRef.current.pause(); }
     setPlaying(false); setPaused(true);
   };
   const resume_ = () => {
-    if (audioRef.current) { audioRef.current.play(); }
+    if (voiceEngine === "browser") { speechSynthesis.resume(); }
+    else if (audioRef.current) { audioRef.current.play(); }
     setPlaying(true); setPaused(false);
   };
   const stop_ = () => {
     if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0; }
+    speechSynthesis.cancel();
     setPlaying(false); setPaused(false); setPct(0);
   };
 
@@ -571,8 +652,8 @@ function AudioPlayer({ script, format }) {
           : paused
             ? <button onClick={resume_} style={btnS(meta.color)}>▶ Resume</button>
             : mp3Loading
-              ? <button disabled style={{...btnS(meta.color), opacity:0.5, cursor:"wait"}}>{loadingMsg || "Loading AI voice..."}</button>
-              : <button onClick={playMp3InBrowser} style={btnS(meta.color, true)}>▶ Play (AI Voice)</button>}
+              ? <button disabled style={{...btnS(meta.color), opacity:0.5, cursor:"wait"}}>{loadingMsg || "Loading voice..."}</button>
+              : <button onClick={play_} style={btnS(meta.color, true)}>▶ Play</button>}
         <button onClick={stop_} style={btnS("#2a2a2a")}>⏹</button>
         {mp3Url && <span style={{ fontSize:13, color:"#2a6", fontFamily:BRAND.monoFont }}>{format === "podcast" ? "● Dual-voice loaded" : "● AI voice loaded"}</span>}
         <span style={{ flex:1 }} />
@@ -745,22 +826,68 @@ function CreditBalance({ balance, error }) {
   );
 }
 
-/* ─── Export MP3 Button (Task 7) ──────────────────────────────────────────── */
+/* ─── Voice Engine Selector ───────────────────────────────────────────────── */
 
-function ExportMp3Button({ output, format, meta, onExportDone }) {
-  const [exportStatus, setExportStatus] = useState("idle"); // idle | exporting | done | error
-  const [exportError, setExportError] = useState("");
+const ENGINES = [
+  { id: "openai",     label: "OpenAI TTS",        color: "#10a37f", icon: "🤖" },
+  { id: "elevenlabs", label: "ElevenLabs",         color: "#f0a030", icon: "🔊" },
+  { id: "browser",    label: "Browser Voice (Free)", color: "#888",  icon: "🖥" },
+];
 
-  const cleaned = cleanScriptForTTS(output, format);
+function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, output, format }) {
+  const cleaned = output ? cleanScriptForTTS(output, format) : "";
   const charCount = cleaned.length;
+  const estCost = (charCount / 1000 * 0.015).toFixed(3);
 
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginTop:4 }}>
+      <span style={{ fontSize:12, color:"#8899aa", fontFamily:BRAND.monoFont, letterSpacing:"0.1em" }}>VOICE:</span>
+      {ENGINES.map(e => (
+        <button
+          key={e.id}
+          onClick={() => onChange(e.id)}
+          style={{
+            background: engine === e.id ? `${e.color}20` : "transparent",
+            border: `1px solid ${engine === e.id ? e.color : "#333"}`,
+            borderRadius: 6,
+            padding: "4px 10px",
+            color: engine === e.id ? e.color : "#777",
+            fontSize: 13,
+            fontFamily: BRAND.monoFont,
+            cursor: "pointer",
+            transition: "all 0.15s",
+          }}
+        >
+          {e.icon} {e.label}
+        </button>
+      ))}
+      <span style={{ fontSize:12, color:"#666", fontFamily:BRAND.monoFont, marginLeft:4 }}>
+        {engine === "openai" && charCount > 0 && `~$${estCost}`}
+        {engine === "elevenlabs" && <CreditBalance balance={elBalance} error={elError} />}
+        {engine === "browser" && "Free"}
+      </span>
+    </div>
+  );
+}
+
+/* ─── Unified Export MP3 Button ──────────────────────────────────────────── */
+
+function ExportMp3Unified({ output, format, meta, voiceEngine, onExportDone }) {
+  const [exportStatus, setExportStatus] = useState("idle");
+  const [exportError, setExportError] = useState("");
   const [exportMsg, setExportMsg] = useState("");
+
+  if (voiceEngine === "browser") return null; // browser voice can't export MP3
 
   const handleExport = async () => {
     setExportStatus("exporting");
     setExportError(""); setExportMsg("");
     try {
-      await exportToMp3(output, format, (msg) => setExportMsg(msg));
+      if (voiceEngine === "openai") {
+        await exportToMp3OpenAI(output, format, (msg) => setExportMsg(msg));
+      } else {
+        await exportToMp3(output, format, (msg) => setExportMsg(msg));
+      }
       setExportStatus("done");
       if (onExportDone) onExportDone();
       setTimeout(() => setExportStatus("idle"), 3000);
@@ -770,73 +897,18 @@ function ExportMp3Button({ output, format, meta, onExportDone }) {
     }
   };
 
+  const engineColor = voiceEngine === "openai" ? "#10a37f" : meta.color;
+  const engineLabel = voiceEngine === "openai" ? "OpenAI" : "ElevenLabs";
+
   return (
-    <div>
+    <div style={{ marginBottom: 16 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button
           onClick={handleExport}
           disabled={exportStatus === "exporting"}
-          title="Export as MP3 via ElevenLabs"
+          title={`Export as MP3 via ${engineLabel}`}
           style={{
-            ...btnS(meta.color, exportStatus === "idle"),
-            opacity: exportStatus === "exporting" ? 0.5 : 1,
-            cursor: exportStatus === "exporting" ? "not-allowed" : "pointer",
-            position: "relative",
-          }}
-        >
-          {exportStatus === "exporting" && (
-            <span style={{ display: "inline-block", animation: "blink 1s ease-in-out infinite" }}>🔊 {exportMsg || "Rendering audio..."}</span>
-          )}
-          {exportStatus === "done" && "✓ Downloaded"}
-          {exportStatus === "error" && "⚠ Retry MP3"}
-          {exportStatus === "idle" && "🔊 Export MP3"}
-        </button>
-        <span style={{ fontSize: 13, color: "#aaa", fontFamily: BRAND.monoFont }}>
-          ~{charCount.toLocaleString()} chars
-        </span>
-      </div>
-      {exportStatus === "error" && exportError && (
-        <div style={{ fontSize: 14, color: meta.color, fontFamily: BRAND.monoFont, marginTop: 6 }}>
-          ElevenLabs error: {exportError}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ─── Export MP3 Button — OpenAI ──────────────────────────────────────────── */
-
-function ExportMp3ButtonOpenAI({ output, format, meta }) {
-  const [exportStatus, setExportStatus] = useState("idle");
-  const [exportError, setExportError] = useState("");
-  const [exportMsg, setExportMsg] = useState("");
-
-  const cleaned = cleanScriptForTTS(output, format);
-  const charCount = cleaned.length;
-  const estCost = (charCount / 1000 * 0.015).toFixed(3);
-
-  const handleExport = async () => {
-    setExportStatus("exporting");
-    setExportError(""); setExportMsg("");
-    try {
-      await exportToMp3OpenAI(output, format, (msg) => setExportMsg(msg));
-      setExportStatus("done");
-      setTimeout(() => setExportStatus("idle"), 3000);
-    } catch (err) {
-      setExportStatus("error");
-      setExportError(err.message);
-    }
-  };
-
-  return (
-    <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <button
-          onClick={handleExport}
-          disabled={exportStatus === "exporting"}
-          title="Export as MP3 via OpenAI TTS"
-          style={{
-            ...btnS("#10a37f", exportStatus === "idle"),
+            ...btnS(engineColor, exportStatus === "idle"),
             opacity: exportStatus === "exporting" ? 0.5 : 1,
             cursor: exportStatus === "exporting" ? "not-allowed" : "pointer",
           }}
@@ -845,16 +917,13 @@ function ExportMp3ButtonOpenAI({ output, format, meta }) {
             <span style={{ display: "inline-block", animation: "blink 1s ease-in-out infinite" }}>🔊 {exportMsg || "Rendering audio..."}</span>
           )}
           {exportStatus === "done" && "✓ Downloaded"}
-          {exportStatus === "error" && "⚠ Retry"}
-          {exportStatus === "idle" && "🔊 Export MP3 (OpenAI)"}
+          {exportStatus === "error" && `⚠ Retry`}
+          {exportStatus === "idle" && `↓ Export MP3 (${engineLabel})`}
         </button>
-        <span style={{ fontSize: 13, color: "#aaa", fontFamily: BRAND.monoFont }}>
-          ~${estCost}
-        </span>
       </div>
       {exportStatus === "error" && exportError && (
-        <div style={{ fontSize: 14, color: "#10a37f", fontFamily: BRAND.monoFont, marginTop: 6 }}>
-          OpenAI error: {exportError}
+        <div style={{ fontSize: 14, color: engineColor, fontFamily: BRAND.monoFont, marginTop: 6 }}>
+          {engineLabel} error: {exportError}
         </div>
       )}
     </div>
@@ -875,6 +944,7 @@ export default function PageCast() {
   const [selectedPages, setSelectedPages] = useState([]);
   const [crawlLinks, setCrawlLinks]     = useState(false);
   const [sourceWordCount, setSourceWordCount] = useState(0);
+  const [voiceEngine, setVoiceEngine]   = useState("openai"); // openai | elevenlabs | browser
   const { balance: elBalance, error: elError, refresh: refreshBalance } = useElevenLabsBalance();
   const outputRef = useRef(null);
   const meta = FORMAT_META[format];
@@ -1107,15 +1177,17 @@ export default function PageCast() {
             <div style={{ display:"flex", gap:8, flexWrap: "wrap", alignItems:"center" }}>
               <button onClick={copy}     style={btnS(meta.color)}>{copied ? "✓ Copied" : "⎘ Copy"}</button>
               <button onClick={download} style={btnS(meta.color)}>↓ Download</button>
-              <ExportMp3Button output={output} format={format} meta={meta} onExportDone={refreshBalance} />
-              <ExportMp3ButtonOpenAI output={output} format={format} meta={meta} />
               <button onClick={()=>{setPhase("idle");setOutput("");setError("");setSourceWordCount(0);}} style={btnS("#282828")}>↺ New</button>
             </div>
-            <CreditBalance balance={elBalance} error={elError} />
+            {/* Voice engine selector */}
+            <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} output={output} format={format} />
           </div>
 
-          {/* audio player (podcast + tts only) */}
-          {format !== "video" && <AudioPlayer script={output} format={format} />}
+          {/* audio player */}
+          {format !== "video" && <AudioPlayer script={output} format={format} voiceEngine={voiceEngine} />}
+
+          {/* export row */}
+          <ExportMp3Unified output={output} format={format} meta={meta} voiceEngine={voiceEngine} onExportDone={refreshBalance} />
 
           {/* script viewer */}
           <div style={{ background:BRAND.cardBg, border:`1px solid ${BRAND.borderColor}`, borderRadius:14, overflow:"hidden", boxShadow:"0 4px 50px rgba(0,0,0,0.6)" }}>
