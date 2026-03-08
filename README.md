@@ -2,6 +2,8 @@
 
 **URL → Broadcast Engine** by SyncShepherd Digital Solutions
 
+🔗 [GitHub Repository](https://github.com/SyncShepherd-Main/syncshepherd-studio)
+
 PageCast transforms any public URL into production-ready media scripts: video scripts with visual cues, dual-host podcast episodes, or TTS-optimised narration. Powered by Claude AI with ElevenLabs MP3 export.
 
 ## Architecture
