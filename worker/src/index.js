@@ -40,6 +40,11 @@ export default {
       return handleTTS(request, env);
     }
 
+    // Route: GET /subscription — ElevenLabs subscription/usage info
+    if (request.method === "GET" && path === "/subscription") {
+      return handleSubscription(env);
+    }
+
     // Route: GET /?url= — Fetch proxy (original)
     if (request.method === "GET") {
       return handleFetch(url);
@@ -143,6 +148,32 @@ async function handleTTS(request, env) {
     });
   } catch (err) {
     return jsonResponse({ error: `ElevenLabs proxy error: ${err.message}` }, 500);
+  }
+}
+
+/* ─── /subscription — ElevenLabs Usage Info ────────────────────────────────── */
+
+async function handleSubscription(env) {
+  if (!env.ELEVENLABS_API_KEY) {
+    return jsonResponse({ error: "ELEVENLABS_API_KEY not configured on worker" }, 500);
+  }
+
+  try {
+    const res = await fetch("https://api.elevenlabs.io/v1/user/subscription", {
+      headers: { "xi-api-key": env.ELEVENLABS_API_KEY },
+    });
+
+    if (!res.ok) {
+      return jsonResponse({ error: `ElevenLabs API error ${res.status}` }, res.status);
+    }
+
+    const data = await res.json();
+    return jsonResponse({
+      character_count: data.character_count,
+      character_limit: data.character_limit,
+    }, 200);
+  } catch (err) {
+    return jsonResponse({ error: `ElevenLabs subscription error: ${err.message}` }, 500);
   }
 }
 

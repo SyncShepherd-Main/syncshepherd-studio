@@ -664,9 +664,45 @@ function InputModeTabs({ inputMode, setInputMode, color }) {
   );
 }
 
+/* ─── ElevenLabs Credit Balance ───────────────────────────────────────────── */
+
+async function fetchElevenLabsBalance() {
+  try {
+    const res = await fetch(`${WORKER_URL}/subscription`);
+    const data = await res.json();
+    if (data.error) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function useElevenLabsBalance() {
+  const [balance, setBalance] = useState(null);
+  const refresh = useCallback(async () => {
+    const data = await fetchElevenLabsBalance();
+    if (data) setBalance(data);
+  }, []);
+  useEffect(() => { refresh(); }, [refresh]);
+  return { balance, refresh };
+}
+
+function CreditBalance({ balance }) {
+  if (!balance) return null;
+  const { character_count, character_limit } = balance;
+  const remaining = character_limit - character_count;
+  const pct = remaining / character_limit;
+  const color = pct < 0.1 ? "#e05050" : pct < 0.3 ? "#e0a030" : "#40b060";
+  return (
+    <div style={{ fontSize: 13, color, fontFamily: BRAND.monoFont }}>
+      ElevenLabs: {remaining.toLocaleString()} / {character_limit.toLocaleString()} chars remaining
+    </div>
+  );
+}
+
 /* ─── Export MP3 Button (Task 7) ──────────────────────────────────────────── */
 
-function ExportMp3Button({ output, format, meta }) {
+function ExportMp3Button({ output, format, meta, onExportDone }) {
   const [exportStatus, setExportStatus] = useState("idle"); // idle | exporting | done | error
   const [exportError, setExportError] = useState("");
 
@@ -681,6 +717,7 @@ function ExportMp3Button({ output, format, meta }) {
     try {
       await exportToMp3(output, format, (msg) => setExportMsg(msg));
       setExportStatus("done");
+      if (onExportDone) onExportDone();
       setTimeout(() => setExportStatus("idle"), 3000);
     } catch (err) {
       setExportStatus("error");
@@ -710,7 +747,7 @@ function ExportMp3Button({ output, format, meta }) {
           {exportStatus === "idle" && "🔊 Export MP3"}
         </button>
         <span style={{ fontSize: 13, color: "#aaa", fontFamily: BRAND.monoFont }}>
-          ~{charCount.toLocaleString()} chars · ~{charCount} credits
+          ~{charCount.toLocaleString()} chars
         </span>
       </div>
       {exportStatus === "error" && exportError && (
@@ -736,6 +773,7 @@ export default function PageCast() {
   const [selectedPages, setSelectedPages] = useState([]);
   const [crawlLinks, setCrawlLinks]     = useState(false);
   const [sourceWordCount, setSourceWordCount] = useState(0);
+  const { balance: elBalance, refresh: refreshBalance } = useElevenLabsBalance();
   const outputRef = useRef(null);
   const meta = FORMAT_META[format];
   const busy = phase === "running";
@@ -959,12 +997,13 @@ export default function PageCast() {
                 </div>
               </div>
             </div>
-            <div style={{ display:"flex", gap:8, flexWrap: "wrap" }}>
+            <div style={{ display:"flex", gap:8, flexWrap: "wrap", alignItems:"center" }}>
               <button onClick={copy}     style={btnS(meta.color)}>{copied ? "✓ Copied" : "⎘ Copy"}</button>
               <button onClick={download} style={btnS(meta.color)}>↓ Download</button>
-              <ExportMp3Button output={output} format={format} meta={meta} />
+              <ExportMp3Button output={output} format={format} meta={meta} onExportDone={refreshBalance} />
               <button onClick={()=>{setPhase("idle");setOutput("");setError("");setSourceWordCount(0);}} style={btnS("#282828")}>↺ New</button>
             </div>
+            <CreditBalance balance={elBalance} />
           </div>
 
           {/* audio player (podcast + tts only) */}
