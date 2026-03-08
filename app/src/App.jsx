@@ -8,10 +8,39 @@ import { useState, useRef, useEffect, useCallback } from "react";
 
 const WORKER_URL = import.meta.env.VITE_WORKER_URL || "http://localhost:8787";
 
-/* Voice IDs — these are NOT secrets (just identifiers), keys stay on the Worker */
-const VOICE_ID_ALEX = "pNInz6obpgDQGcFmaJgB";    // Adam
-const VOICE_ID_MORGAN = "XrExE9yKIg1WjnnlVkGX";  // Matilda
-const VOICE_ID_DEFAULT = VOICE_ID_ALEX;
+/* ElevenLabs Voice IDs — NOT secrets (just identifiers), keys stay on the Worker */
+const ELEVENLABS_VOICES = {
+  adam:     { id: "pNInz6obpgDQGcFmaJgB", label: "Adam",     desc: "Deep, warm" },
+  matilda:  { id: "XrExE9yKIg1WjnnlVkGX", label: "Matilda",  desc: "Bright, articulate" },
+  charlie:  { id: "IKne3meq5aSn9XLyUdCD", label: "Charlie",  desc: "Natural, Australian" },
+  rachel:   { id: "21m00Tcm4TlvDq8ikWAM", label: "Rachel",   desc: "Calm, collected" },
+  clyde:    { id: "2EiwWnXFnvU5JabPnv8n", label: "Clyde",    desc: "Gruff, middle-aged" },
+  dorothy:  { id: "ThT5KcBeYPX3keUQqHPh", label: "Dorothy",  desc: "Friendly, pleasant" },
+};
+
+/* OpenAI TTS Voices */
+const OPENAI_VOICES = {
+  onyx:    { label: "Onyx",    desc: "Deep, authoritative" },
+  alloy:   { label: "Alloy",   desc: "Neutral, balanced" },
+  echo:    { label: "Echo",    desc: "Warm, engaging" },
+  fable:   { label: "Fable",   desc: "Expressive, British" },
+  nova:    { label: "Nova",    desc: "Friendly, upbeat" },
+  shimmer: { label: "Shimmer", desc: "Soft, clear" },
+  ash:     { label: "Ash",     desc: "Conversational" },
+  coral:   { label: "Coral",   desc: "Warm, natural" },
+  sage:    { label: "Sage",    desc: "Calm, wise" },
+  ballad:  { label: "Ballad",  desc: "Smooth, melodic" },
+};
+
+/* Vibe presets — injected into system prompt */
+const VIBES = {
+  professional: { label: "Professional", icon: "💼", desc: "Polished, authoritative, business-ready" },
+  casual:       { label: "Casual",       icon: "😎", desc: "Relaxed, conversational, approachable" },
+  energetic:    { label: "Energetic",    icon: "⚡", desc: "High-energy, punchy, fast-paced" },
+  storyteller:  { label: "Storyteller",  icon: "📖", desc: "Narrative, immersive, cinematic" },
+  educational:  { label: "Educational",  icon: "🎓", desc: "Clear, patient, informative" },
+  humorous:     { label: "Humorous",     icon: "😂", desc: "Witty, playful, entertaining" },
+};
 
 /* ─── SyncShepherd Brand ─────────────────────────────────────────────────── */
 const BRAND = {
@@ -59,12 +88,23 @@ const FORMAT_META = {
 
 /* ─── System Prompts (DO NOT MODIFY — calibrated output) ─────────────────── */
 
-function buildSystemPrompt(format, isMultiPage = false) {
+function buildSystemPrompt(format, isMultiPage = false, vibe = "professional") {
   const multiPageNote = isMultiPage
     ? `\n\nNOTE: The content below comes from multiple pages, separated by PAGE BREAK markers. Treat all pages as a single cohesive source — synthesise across all of them, covering every page's content in full.`
     : "";
 
-  const shared = `You are a world-class broadcast media producer. Your job is to take the provided page content and produce a broadcast-ready script in the format specified below. Read every section thoroughly. Do not summarise or skip any part.${multiPageNote}`;
+  const vibeInstructions = {
+    professional: "Tone: polished, authoritative, confident. Speak like a seasoned broadcast professional.",
+    casual: "Tone: relaxed, conversational, approachable. Speak like you're talking to a friend over coffee.",
+    energetic: "Tone: high-energy, punchy, fast-paced. Use short sentences. Build excitement. Keep momentum.",
+    storyteller: "Tone: narrative, immersive, cinematic. Paint pictures with words. Build tension and resolution.",
+    educational: "Tone: clear, patient, informative. Explain concepts simply. Use analogies. Build understanding step by step.",
+    humorous: "Tone: witty, playful, entertaining. Use clever observations, mild self-deprecation, and unexpected connections. Keep it tasteful.",
+  };
+
+  const vibeNote = vibeInstructions[vibe] || vibeInstructions.professional;
+
+  const shared = `You are a world-class broadcast media producer. Your job is to take the provided page content and produce a broadcast-ready script in the format specified below. Read every section thoroughly. Do not summarise or skip any part.\n\n${vibeNote}${multiPageNote}`;
 
   const formats = {
     video: `${shared}
@@ -148,14 +188,14 @@ async function fetchViaWorkerWithLinks(url) {
   return data;
 }
 
-async function generateScript(text, format, isMultiPage = false) {
+async function generateScript(text, format, isMultiPage = false, vibe = "professional") {
   const res = await fetch(`${WORKER_URL}/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
       max_tokens: 4000,
-      system: buildSystemPrompt(format, isMultiPage),
+      system: buildSystemPrompt(format, isMultiPage, vibe),
       messages: [{
         role: "user",
         content: `Produce the complete ${FORMAT_META[format].tag} script from the following page content:\n\n${text}`
@@ -263,10 +303,9 @@ function concatAudioBuffers(buffers) {
 }
 
 /**
- * Generate podcast MP3 with distinct voices for ALEX and MORGAN.
- * Renders each speaker segment sequentially, then concatenates.
+ * Generate podcast MP3 with distinct ElevenLabs voices for ALEX and MORGAN.
  */
-async function generatePodcastMp3(scriptText, onProgress) {
+async function generatePodcastMp3(scriptText, onProgress, voiceKey1 = "adam", voiceKey2 = "matilda") {
   const segments = parsePodcastSegments(scriptText);
   if (segments.length === 0) throw new Error("No dialogue found in script");
 
@@ -274,7 +313,9 @@ async function generatePodcastMp3(scriptText, onProgress) {
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     if (onProgress) onProgress(`Rendering ${seg.speaker} (${i + 1}/${segments.length})...`);
-    const voiceId = seg.speaker === "MORGAN" ? VOICE_ID_MORGAN : VOICE_ID_ALEX;
+    const voiceId = seg.speaker === "MORGAN"
+      ? ELEVENLABS_VOICES[voiceKey2].id
+      : ELEVENLABS_VOICES[voiceKey1].id;
     const buffer = await fetchTTSClip(seg.text, voiceId);
     audioBuffers.push(buffer);
   }
@@ -282,19 +323,19 @@ async function generatePodcastMp3(scriptText, onProgress) {
   return concatAudioBuffers(audioBuffers);
 }
 
-/** Generate single-voice MP3 for video/tts formats */
-async function generateSingleVoiceMp3(scriptText, format) {
+/** Generate single-voice MP3 via ElevenLabs */
+async function generateSingleVoiceMp3(scriptText, format, voiceKey1 = "adam") {
   const cleaned = cleanScriptForTTS(scriptText, format);
-  const buffer = await fetchTTSClip(cleaned, VOICE_ID_DEFAULT);
+  const buffer = await fetchTTSClip(cleaned, ELEVENLABS_VOICES[voiceKey1].id);
   return new Blob([buffer], { type: "audio/mpeg" });
 }
 
-async function exportToMp3(scriptText, format, onProgress) {
+async function exportToMp3(scriptText, format, onProgress, voiceKey1 = "adam", voiceKey2 = "matilda") {
   let blob;
   if (format === "podcast") {
-    blob = await generatePodcastMp3(scriptText, onProgress);
+    blob = await generatePodcastMp3(scriptText, onProgress, voiceKey1, voiceKey2);
   } else {
-    blob = await generateSingleVoiceMp3(scriptText, format);
+    blob = await generateSingleVoiceMp3(scriptText, format, voiceKey1);
   }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -304,12 +345,12 @@ async function exportToMp3(scriptText, format, onProgress) {
   URL.revokeObjectURL(url);
 }
 
-/** Generate MP3 blob for in-browser playback */
-async function generateMp3Blob(scriptText, format, onProgress) {
+/** Generate MP3 blob for in-browser ElevenLabs playback */
+async function generateMp3Blob(scriptText, format, onProgress, voiceKey1 = "adam", voiceKey2 = "matilda") {
   if (format === "podcast") {
-    return await generatePodcastMp3(scriptText, onProgress);
+    return await generatePodcastMp3(scriptText, onProgress, voiceKey1, voiceKey2);
   } else {
-    return await generateSingleVoiceMp3(scriptText, format);
+    return await generateSingleVoiceMp3(scriptText, format, voiceKey1);
   }
 }
 
@@ -329,8 +370,8 @@ async function fetchOpenAITTSClip(text, voice) {
   return await res.arrayBuffer();
 }
 
-/** Generate podcast MP3 with OpenAI voices (onyx=ALEX, alloy=MORGAN) */
-async function generatePodcastMp3OpenAI(scriptText, onProgress) {
+/** Generate podcast MP3 with OpenAI voices */
+async function generatePodcastMp3OpenAI(scriptText, onProgress, voice1 = "onyx", voice2 = "alloy") {
   const segments = parsePodcastSegments(scriptText);
   if (segments.length === 0) throw new Error("No dialogue found in script");
 
@@ -338,7 +379,7 @@ async function generatePodcastMp3OpenAI(scriptText, onProgress) {
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
     if (onProgress) onProgress(`Rendering ${seg.speaker} (${i + 1}/${segments.length})...`);
-    const voice = seg.speaker === "MORGAN" ? "alloy" : "onyx";
+    const voice = seg.speaker === "MORGAN" ? voice2 : voice1;
     const buffer = await fetchOpenAITTSClip(seg.text, voice);
     audioBuffers.push(buffer);
   }
@@ -346,18 +387,18 @@ async function generatePodcastMp3OpenAI(scriptText, onProgress) {
 }
 
 /** Generate single-voice MP3 via OpenAI */
-async function generateSingleVoiceMp3OpenAI(scriptText, format) {
+async function generateSingleVoiceMp3OpenAI(scriptText, format, voice1 = "onyx") {
   const cleaned = cleanScriptForTTS(scriptText, format);
-  const buffer = await fetchOpenAITTSClip(cleaned, "onyx");
+  const buffer = await fetchOpenAITTSClip(cleaned, voice1);
   return new Blob([buffer], { type: "audio/mpeg" });
 }
 
-async function exportToMp3OpenAI(scriptText, format, onProgress) {
+async function exportToMp3OpenAI(scriptText, format, onProgress, voice1 = "onyx", voice2 = "alloy") {
   let blob;
   if (format === "podcast") {
-    blob = await generatePodcastMp3OpenAI(scriptText, onProgress);
+    blob = await generatePodcastMp3OpenAI(scriptText, onProgress, voice1, voice2);
   } else {
-    blob = await generateSingleVoiceMp3OpenAI(scriptText, format);
+    blob = await generateSingleVoiceMp3OpenAI(scriptText, format, voice1);
   }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -453,7 +494,7 @@ function ScriptBlock({ content, format }) {
   );
 }
 
-function AudioPlayer({ script, format, voiceEngine }) {
+function AudioPlayer({ script, format, voiceEngine, openaiVoice1, openaiVoice2, elevenVoice1, elevenVoice2 }) {
   const [playing, setPlaying] = useState(false);
   const [paused, setPaused]   = useState(false);
   const [speed, setSpeed]     = useState(1);
@@ -576,10 +617,10 @@ function AudioPlayer({ script, format, voiceEngine }) {
       let blob;
       if (voiceEngine === "openai") {
         blob = format === "podcast"
-          ? await generatePodcastMp3OpenAI(script, (msg) => setLoadingMsg(msg))
-          : await generateSingleVoiceMp3OpenAI(script, format);
+          ? await generatePodcastMp3OpenAI(script, (msg) => setLoadingMsg(msg), openaiVoice1, openaiVoice2)
+          : await generateSingleVoiceMp3OpenAI(script, format, openaiVoice1);
       } else {
-        blob = await generateMp3Blob(script, format, (msg) => setLoadingMsg(msg));
+        blob = await generateMp3Blob(script, format, (msg) => setLoadingMsg(msg), elevenVoice1, elevenVoice2);
       }
       const blobUrl = URL.createObjectURL(blob);
       setMp3Url(blobUrl);
@@ -834,45 +875,98 @@ const ENGINES = [
   { id: "browser",    label: "Browser Voice (Free)", color: "#888",  icon: "🖥" },
 ];
 
-function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, output, format }) {
+function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, output, format,
+  openaiVoice1, setOpenaiVoice1, openaiVoice2, setOpenaiVoice2,
+  elevenVoice1, setElevenVoice1, elevenVoice2, setElevenVoice2 }) {
+
   const cleaned = output ? cleanScriptForTTS(output, format) : "";
   const charCount = cleaned.length;
   const estCost = (charCount / 1000 * 0.015).toFixed(3);
+  const isPodcast = format === "podcast";
+
+  const selectStyle = {
+    background: BRAND.cardBg, border: `1px solid ${BRAND.borderColor}`, borderRadius: 6,
+    color: "#ccc", fontSize: 13, fontFamily: BRAND.monoFont, padding: "4px 8px", cursor: "pointer",
+  };
 
   return (
-    <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap", marginTop:4 }}>
-      <span style={{ fontSize:12, color:"#8899aa", fontFamily:BRAND.monoFont, letterSpacing:"0.1em" }}>VOICE:</span>
-      {ENGINES.map(e => (
-        <button
-          key={e.id}
-          onClick={() => onChange(e.id)}
-          style={{
-            background: engine === e.id ? `${e.color}20` : "transparent",
-            border: `1px solid ${engine === e.id ? e.color : "#333"}`,
-            borderRadius: 6,
-            padding: "4px 10px",
-            color: engine === e.id ? e.color : "#777",
-            fontSize: 13,
-            fontFamily: BRAND.monoFont,
-            cursor: "pointer",
-            transition: "all 0.15s",
-          }}
-        >
-          {e.icon} {e.label}
-        </button>
-      ))}
-      <span style={{ fontSize:12, color:"#666", fontFamily:BRAND.monoFont, marginLeft:4 }}>
-        {engine === "openai" && charCount > 0 && `~$${estCost}`}
-        {engine === "elevenlabs" && <CreditBalance balance={elBalance} error={elError} />}
-        {engine === "browser" && "Free"}
-      </span>
+    <div style={{ marginTop:8 }}>
+      {/* Engine toggle row */}
+      <div style={{ display:"flex", alignItems:"center", gap:6, flexWrap:"wrap" }}>
+        <span style={{ fontSize:12, color:"#8899aa", fontFamily:BRAND.monoFont, letterSpacing:"0.1em" }}>ENGINE:</span>
+        {ENGINES.map(e => (
+          <button
+            key={e.id}
+            onClick={() => onChange(e.id)}
+            style={{
+              background: engine === e.id ? `${e.color}20` : "transparent",
+              border: `1px solid ${engine === e.id ? e.color : "#333"}`,
+              borderRadius: 6, padding: "4px 10px",
+              color: engine === e.id ? e.color : "#777",
+              fontSize: 13, fontFamily: BRAND.monoFont,
+              cursor: "pointer", transition: "all 0.15s",
+            }}
+          >
+            {e.icon} {e.label}
+          </button>
+        ))}
+        <span style={{ fontSize:12, color:"#666", fontFamily:BRAND.monoFont, marginLeft:4 }}>
+          {engine === "openai" && charCount > 0 && `~$${estCost}`}
+          {engine === "elevenlabs" && <CreditBalance balance={elBalance} error={elError} />}
+          {engine === "browser" && "Free"}
+        </span>
+      </div>
+
+      {/* Voice picker row */}
+      {engine !== "browser" && (
+        <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap", marginTop:8 }}>
+          <span style={{ fontSize:12, color:"#8899aa", fontFamily:BRAND.monoFont, letterSpacing:"0.1em" }}>
+            {isPodcast ? "ALEX:" : "VOICE:"}
+          </span>
+          {engine === "openai" && (
+            <select value={openaiVoice1} onChange={e => setOpenaiVoice1(e.target.value)} style={selectStyle}>
+              {Object.entries(OPENAI_VOICES).map(([k,v]) => (
+                <option key={k} value={k}>{v.label} — {v.desc}</option>
+              ))}
+            </select>
+          )}
+          {engine === "elevenlabs" && (
+            <select value={elevenVoice1} onChange={e => setElevenVoice1(e.target.value)} style={selectStyle}>
+              {Object.entries(ELEVENLABS_VOICES).map(([k,v]) => (
+                <option key={k} value={k}>{v.label} — {v.desc}</option>
+              ))}
+            </select>
+          )}
+
+          {isPodcast && (
+            <>
+              <span style={{ fontSize:12, color:"#8899aa", fontFamily:BRAND.monoFont, letterSpacing:"0.1em", marginLeft:8 }}>MORGAN:</span>
+              {engine === "openai" && (
+                <select value={openaiVoice2} onChange={e => setOpenaiVoice2(e.target.value)} style={selectStyle}>
+                  {Object.entries(OPENAI_VOICES).map(([k,v]) => (
+                    <option key={k} value={k}>{v.label} — {v.desc}</option>
+                  ))}
+                </select>
+              )}
+              {engine === "elevenlabs" && (
+                <select value={elevenVoice2} onChange={e => setElevenVoice2(e.target.value)} style={selectStyle}>
+                  {Object.entries(ELEVENLABS_VOICES).map(([k,v]) => (
+                    <option key={k} value={k}>{v.label} — {v.desc}</option>
+                  ))}
+                </select>
+              )}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 /* ─── Unified Export MP3 Button ──────────────────────────────────────────── */
 
-function ExportMp3Unified({ output, format, meta, voiceEngine, onExportDone }) {
+function ExportMp3Unified({ output, format, meta, voiceEngine, onExportDone,
+  openaiVoice1, openaiVoice2, elevenVoice1, elevenVoice2 }) {
   const [exportStatus, setExportStatus] = useState("idle");
   const [exportError, setExportError] = useState("");
   const [exportMsg, setExportMsg] = useState("");
@@ -884,9 +978,9 @@ function ExportMp3Unified({ output, format, meta, voiceEngine, onExportDone }) {
     setExportError(""); setExportMsg("");
     try {
       if (voiceEngine === "openai") {
-        await exportToMp3OpenAI(output, format, (msg) => setExportMsg(msg));
+        await exportToMp3OpenAI(output, format, (msg) => setExportMsg(msg), openaiVoice1, openaiVoice2);
       } else {
-        await exportToMp3(output, format, (msg) => setExportMsg(msg));
+        await exportToMp3(output, format, (msg) => setExportMsg(msg), elevenVoice1, elevenVoice2);
       }
       setExportStatus("done");
       if (onExportDone) onExportDone();
@@ -945,6 +1039,12 @@ export default function PageCast() {
   const [crawlLinks, setCrawlLinks]     = useState(false);
   const [sourceWordCount, setSourceWordCount] = useState(0);
   const [voiceEngine, setVoiceEngine]   = useState("openai"); // openai | elevenlabs | browser
+  const [vibe, setVibe]                 = useState("professional");
+  // Voice selections: host1 = main/ALEX voice, host2 = MORGAN voice (podcast only)
+  const [openaiVoice1, setOpenaiVoice1]   = useState("onyx");
+  const [openaiVoice2, setOpenaiVoice2]   = useState("alloy");
+  const [elevenVoice1, setElevenVoice1]   = useState("adam");
+  const [elevenVoice2, setElevenVoice2]   = useState("matilda");
   const { balance: elBalance, error: elError, refresh: refreshBalance } = useElevenLabsBalance();
   const outputRef = useRef(null);
   const meta = FORMAT_META[format];
@@ -1006,7 +1106,7 @@ export default function PageCast() {
       setSourceWordCount(srcWords);
 
       setStatus(`Generating your ${FORMAT_META[format].tag}...`);
-      const result = await generateScript(combinedText, format, isMultiPage);
+      const result = await generateScript(combinedText, format, isMultiPage, vibe);
       setOutput(result);
       setPhase("done");
       setTimeout(() => outputRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 150);
@@ -1120,6 +1220,30 @@ export default function PageCast() {
           ))}
         </div>
 
+        {/* Vibe selector */}
+        <div style={{ marginBottom:16 }}>
+          <div style={{ fontSize:12, color:"#8899aa", fontFamily:BRAND.monoFont, letterSpacing:"0.1em", marginBottom:8 }}>VIBE:</div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            {Object.entries(VIBES).map(([id, v]) => (
+              <button
+                key={id}
+                onClick={() => setVibe(id)}
+                title={v.desc}
+                style={{
+                  background: vibe === id ? `${meta.color}20` : "transparent",
+                  border: `1px solid ${vibe === id ? meta.color : "#333"}`,
+                  borderRadius: 7, padding: "6px 12px",
+                  color: vibe === id ? meta.color : "#777",
+                  fontSize: 13, fontFamily: BRAND.monoFont,
+                  cursor: "pointer", transition: "all 0.15s",
+                }}
+              >
+                {v.icon} {v.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Generate button */}
         <button onClick={run} disabled={busy} style={{
           width:"100%", padding:"18px", borderRadius:11, border:"none",
@@ -1180,14 +1304,20 @@ export default function PageCast() {
               <button onClick={()=>{setPhase("idle");setOutput("");setError("");setSourceWordCount(0);}} style={btnS("#282828")}>↺ New</button>
             </div>
             {/* Voice engine selector */}
-            <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} output={output} format={format} />
+            <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} output={output} format={format}
+              openaiVoice1={openaiVoice1} setOpenaiVoice1={setOpenaiVoice1} openaiVoice2={openaiVoice2} setOpenaiVoice2={setOpenaiVoice2}
+              elevenVoice1={elevenVoice1} setElevenVoice1={setElevenVoice1} elevenVoice2={elevenVoice2} setElevenVoice2={setElevenVoice2} />
           </div>
 
           {/* audio player */}
-          {format !== "video" && <AudioPlayer script={output} format={format} voiceEngine={voiceEngine} />}
+          {format !== "video" && <AudioPlayer script={output} format={format} voiceEngine={voiceEngine}
+            openaiVoice1={openaiVoice1} openaiVoice2={openaiVoice2}
+            elevenVoice1={elevenVoice1} elevenVoice2={elevenVoice2} />}
 
           {/* export row */}
-          <ExportMp3Unified output={output} format={format} meta={meta} voiceEngine={voiceEngine} onExportDone={refreshBalance} />
+          <ExportMp3Unified output={output} format={format} meta={meta} voiceEngine={voiceEngine} onExportDone={refreshBalance}
+            openaiVoice1={openaiVoice1} openaiVoice2={openaiVoice2}
+            elevenVoice1={elevenVoice1} elevenVoice2={elevenVoice2} />
 
           {/* script viewer */}
           <div style={{ background:BRAND.cardBg, border:`1px solid ${BRAND.borderColor}`, borderRadius:14, overflow:"hidden", boxShadow:"0 4px 50px rgba(0,0,0,0.6)" }}>
