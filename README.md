@@ -14,31 +14,60 @@ Access is restricted via Cloudflare Zero Trust (Access policy on the Pages domai
 
 ## What It Does
 
-PageCast takes any public URL (or pages from your Content Library) and generates broadcast-ready media scripts using Claude AI:
+PageCast takes any public URL, fetches the full page content server-side via a Cloudflare Worker, and generates broadcast-ready media scripts using Claude AI. Six output formats are available:
 
-- **Video Script** — scene-by-scene with visual cues, B-roll notes, on-screen text
-- **Dual-Host Podcast** — ALEX + MORGAN dialogue with stage directions
-- **TTS Narration** — spoken-word prose optimized for audio
+- **Video Script** — scene-by-scene with visual cues, B-roll notes, on-screen text (gold accent)
+- **Dual-Host Podcast** — ALEX + MORGAN dialogue with stage directions (blue accent)
+- **TTS Narration** — audio-optimised spoken-word prose (teal accent)
+- **Tell the Story** — compelling narrative prose from any content (purple accent)
+- **Word for Word** — verbatim source text, no AI rewriting (grey accent)
+- **Summary** — detailed 300–1,500 word summary scaled to source length (orange accent)
 
-Scripts can be copied, downloaded as .txt, played via browser speech synthesis, or exported as MP3 via ElevenLabs (uses API credits).
+### Voice Engines
+
+Three voice/speech engines are available, selectable per session:
+
+| Engine | Cost | Quality | Notes |
+|--------|------|---------|-------|
+| **OpenAI TTS** | ~$0.015/1K chars | High — 11 voices | Default. Parallel batch rendering. |
+| **ElevenLabs** | Per subscription plan | Very high — 6 voices | Dual-voice podcast support. |
+| **Browser Voice** | Free | Varies by OS/browser | Uses Web SpeechSynthesis API. |
+
+### Vibe System
+
+A "vibe" selector injects tone instructions into the Claude system prompt before generation:
+
+- Professional, Casual, Energetic, Storyteller, Educational, Humorous
+
+### Post-Generation Tools
+
+- **Regenerate** — re-runs script generation from the same fetched source text (no re-fetch)
+- **Edit Transcript** — opens an editable textarea; save changes and Play/Export uses the edited text
+- **Copy / Download** — clipboard or .txt file
+- **Play** — in-browser audio playback via selected voice engine
+- **Export MP3** — renders and downloads full MP3 via selected voice engine
 
 ## Architecture
 
 ```
 Browser (React/Vite)
     |
-    |--- GET /?url=<url>       --> Worker fetches & cleans page
-    |--- GET /?url=<url>&links --> Worker fetches page + discovers internal links
-    |--- POST /generate        --> Worker proxies to Anthropic Messages API
-    |--- POST /tts             --> Worker proxies to ElevenLabs TTS API
+    |--- GET /?url=<url>          --> Worker fetches & cleans page
+    |--- GET /?url=<url>&links    --> Worker fetches page + discovers internal links
+    |--- POST /generate           --> Worker proxies to Anthropic Messages API
+    |--- POST /tts                --> Worker proxies to ElevenLabs TTS API
+    |--- POST /tts-openai         --> Worker proxies to OpenAI TTS API
+    |--- GET  /subscription       --> Worker returns ElevenLabs usage info
+    |--- GET  /openai-billing     --> Worker returns OpenAI billing/balance info
     |
 Cloudflare Worker (pagecast-fetcher)
     |--- API keys stored as Worker Secrets (never exposed to browser)
     |--- ANTHROPIC_API_KEY
     |--- ELEVENLABS_API_KEY
+    |--- OPENAI_API_KEY
 ```
 
-**Key design:** All API keys live on the Worker as secrets. The React app only knows the Worker URL — it never touches Anthropic or ElevenLabs directly.
+**Key design:** All API keys live on the Worker as secrets. The React app only knows the Worker URL — it never touches Anthropic, ElevenLabs, or OpenAI directly.
 
 ## Branding
 
@@ -47,6 +76,15 @@ Uses SyncShepherd brand identity:
 - **Accent Gold:** #eeaf00
 - **Dark Navy:** #192534
 - **Fonts:** Heebo (headings), Roboto (body), Roboto Mono (code/labels)
+
+## Security
+
+- All API keys stored as Cloudflare Worker Secrets (production) or `.dev.vars` (local dev)
+- Frontend contains zero credentials — only the Worker URL
+- `.gitignore` covers `.env`, `.dev.vars`, `dist/`, `node_modules/`
+- CORS currently set to `*` (open) — consider restricting to `https://pagecast-a6g.pages.dev` in production
+- Input validation on all Worker routes (URL format, JSON body, required fields)
+- ElevenLabs voice IDs are public identifiers, not secrets
 
 ## Local Development
 
@@ -69,6 +107,7 @@ Create `worker/.dev.vars`:
 ```
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 ELEVENLABS_API_KEY=your-elevenlabs-key
+OPENAI_API_KEY=sk-your-openai-key-here
 ```
 
 ### 3. Configure app environment
@@ -117,9 +156,12 @@ Set secrets (one-time, or when keys change):
 ```bash
 npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put ELEVENLABS_API_KEY
+npx wrangler secret put OPENAI_API_KEY
 ```
 
 ### Deploy the App (Cloudflare Pages)
+
+**IMPORTANT:** Always use `--branch main` to deploy to production. Without it, deploys go to a Preview URL instead.
 
 ```bash
 cd app
@@ -127,9 +169,9 @@ cd app
 # Set production Worker URL in .env
 echo "VITE_WORKER_URL=https://pagecast-fetcher.syncshepherd.workers.dev" > .env
 
-# Build and deploy
+# Build and deploy to production
 npx vite build
-npx wrangler pages deploy dist --project-name pagecast
+npx wrangler pages deploy dist --project-name pagecast --branch main
 ```
 
 ### Access Control (Cloudflare Zero Trust)
@@ -194,25 +236,75 @@ Proxies to ElevenLabs TTS API. Returns `audio/mpeg` stream. Body:
 }
 ```
 
-## ElevenLabs Voice Setup
+### POST /tts-openai
 
-Voices are hardcoded in the app:
-- **ALEX** (Adam): `pNInz6obpgDQGcFmaJgB`
-- **MORGAN** (Matilda): `XrExE9yKIg1WjnnlVkGX`
+Proxies to OpenAI TTS API. Returns `audio/mpeg` stream. Body:
 
-Podcast format uses both voices (dual-voice). Video and TTS use ALEX only.
+```json
+{
+  "text": "Text to speak (max ~4096 chars per request)",
+  "voice": "onyx",
+  "model": "tts-1"
+}
+```
 
-**Credit budget:** A typical 1,200-word podcast script is ~7,500 characters. The app shows character count before each MP3 export.
+### GET /subscription
 
-**What costs ElevenLabs credits:**
-- "Play (AI Voice)" button
-- "Export MP3" button
+Returns ElevenLabs character usage:
 
-**What does NOT cost credits:**
-- Fetching pages (Worker only)
-- Generating scripts (Anthropic API, separate billing)
+```json
+{
+  "character_count": 1234,
+  "character_limit": 10000
+}
+```
+
+### GET /openai-billing
+
+Returns OpenAI monthly cost and/or credit balance (if available). Falls back to `{ rate: 0.015 }` if billing endpoints aren't accessible.
+
+## Voice Configuration
+
+### OpenAI TTS Voices (11 options)
+
+| Key | Voice | Description |
+|-----|-------|-------------|
+| onyx | Onyx | Deep, authoritative |
+| alloy | Alloy | Neutral, balanced |
+| echo | Echo | Warm, engaging |
+| fable | Fable | Expressive, British |
+| nova | Nova | Friendly, upbeat |
+| shimmer | Shimmer | Soft, clear |
+| ash | Ash | Conversational |
+| coral | Coral | Warm, natural |
+| sage | Sage | Calm, wise |
+| ballad | Ballad | Smooth, melodic |
+| verse | Verse | Versatile, dynamic |
+
+### ElevenLabs Voices (6 options)
+
+| Key | Voice | ID | Description |
+|-----|-------|----|-------------|
+| adam | Adam | pNInz6obpgDQGcFmaJgB | Deep, warm |
+| matilda | Matilda | XrExE9yKIg1WjnnlVkGX | Bright, articulate |
+| charlie | Charlie | IKne3meq5aSn9XLyUdCD | Natural, Australian |
+| rachel | Rachel | 21m00Tcm4TlvDq8ikWAM | Calm, collected |
+| clyde | Clyde | 2EiwWnXFnvU5JabPnv8n | Gruff, middle-aged |
+| dorothy | Dorothy | ThT5KcBeYPX3keUQqHPh | Friendly, pleasant |
+
+Podcast format uses two voices (host 1 = ALEX, host 2 = MORGAN). All other formats use host 1 only.
+
+## Cost Reference
+
+**What costs money:**
+- Play (AI Voice) and Export MP3 with OpenAI TTS (~$0.015 per 1,000 characters)
+- Play (AI Voice) and Export MP3 with ElevenLabs (per your subscription plan)
+- Script generation via Anthropic API (per your API plan)
+
+**What is free:**
+- Fetching pages (Worker compute only)
 - Copy/Download text
-- Browser SpeechSynthesis playback (free, uses computer voices)
+- Browser Voice playback (Web SpeechSynthesis — no API calls)
 
 ## Features
 
@@ -221,13 +313,23 @@ Podcast format uses both voices (dual-voice). Video and TTS use ALEX only.
 | Cloudflare Worker fetch proxy | Deployed |
 | Anthropic API proxy (keys on Worker) | Deployed |
 | ElevenLabs TTS proxy (keys on Worker) | Deployed |
-| Three output formats (Video, Podcast, TTS) | Done |
-| Content Library browser | Done |
+| OpenAI TTS proxy (keys on Worker) | Deployed |
+| Six output formats (Video, Podcast, TTS, Story, Verbatim, Summary) | Done |
+| Voice Engine selector (OpenAI / ElevenLabs / Browser) | Done |
+| Voice picker per engine (11 OpenAI, 6 ElevenLabs) | Done |
+| Vibe selector (6 tones injected into system prompt) | Done |
 | Multi-page crawl (up to 10 links) | Done |
-| Dual-voice podcast MP3 (ALEX + MORGAN) | Done |
+| Dual-voice podcast MP3 (host 1 + host 2) | Done |
 | Single-voice MP3 export | Done |
+| Parallel TTS rendering (batches of 4 OpenAI / 3 ElevenLabs) | Done |
+| Text chunking for long scripts (~3,800 char splits) | Done |
+| Regenerate from cached source text | Done |
+| Editable transcript with audio re-render | Done |
+| OpenAI billing/balance display | Done |
+| ElevenLabs usage display | Done |
 | Browser SpeechSynthesis fallback | Done |
 | Copy + Download script export | Done |
+| Feature highlights + format detail cards | Done |
 | SyncShepherd branding | Done |
 | Cloudflare Pages deployment | Done |
 | Cloudflare Access (Zero Trust) | Needs setup |
@@ -236,15 +338,17 @@ Podcast format uses both voices (dual-voice). Video and TTS use ALEX only.
 
 ```
 syncshepherd-studio/
-├── worker/                    # Cloudflare Worker
-│   ├── src/index.js           #   Routes: GET /?url, POST /generate, POST /tts
+├── worker/                    # Cloudflare Worker (439 lines)
+│   ├── src/index.js           #   Routes: GET /?url, POST /generate, POST /tts,
+│   │                          #           POST /tts-openai, GET /subscription,
+│   │                          #           GET /openai-billing
 │   ├── .dev.vars              #   Local dev secrets (gitignored)
 │   ├── wrangler.toml          #   Worker config
 │   └── package.json
 ├── app/                       # React app (Vite)
 │   ├── src/
 │   │   ├── main.jsx           #   React entry point
-│   │   └── App.jsx            #   PageCast — all UI + logic (974 lines)
+│   │   └── App.jsx            #   PageCast — all UI + logic (1,446 lines)
 │   ├── dist/                  #   Production build output (gitignored)
 │   ├── index.html             #   HTML shell + Google Fonts
 │   ├── vite.config.js
@@ -256,7 +360,3 @@ syncshepherd-studio/
 ├── .gitignore
 └── README.md
 ```
-
-## Content Library
-
-The Content Library tab browses a connected GitHub repo and fetches files via raw.githubusercontent.com through the Worker proxy. The repo URL is configured in `App.jsx` (`RepoFilePicker` component).
