@@ -62,28 +62,48 @@ const FORMAT_META = {
     tag: "VIDEO",
     color: "#eeaf00",
     glow: "rgba(238,175,0,0.35)",
-    desc: "Scene-by-scene with visual cues & B-roll"
+    desc: "Scene-by-scene with visual cues & B-roll",
+    detail: "Produces a documentary-style video script with labelled scenes, [VISUAL CUE] and [B-ROLL] markers, [ON-SCREEN TEXT] callouts, and narration written in a dynamic broadcast voice. Includes a hook, scene-by-scene breakdown, and a call to action. 900–1,600 words."
   },
   podcast: {
     label: "🎙 Dual-Host Podcast",
     tag: "PODCAST",
     color: "#0f70b7",
     glow: "rgba(15,112,183,0.35)",
-    desc: "Two hosts, full dialogue, natural flow"
+    desc: "Two hosts, full dialogue, natural flow",
+    detail: "Creates a full dual-host podcast episode with ALEX (analytical, evidence-driven) and MORGAN (storyteller, relatable). Natural dialogue with interruptions, stage directions, rhetorical questions, and segment headers. Dual-voice MP3 export available. 1,100–1,800 words."
   },
   tts: {
     label: "📢 TTS Narration",
     tag: "NARRATION",
     color: "#34b899",
     glow: "rgba(52,184,153,0.35)",
-    desc: "Audio-optimised spoken-word prose"
+    desc: "Audio-optimised spoken-word prose",
+    detail: "Generates pure spoken-word narration optimised for text-to-speech playback. No bullet points, no headers — just flowing prose with natural cadence, like a trusted public radio presenter. Ideal for audio-first content. 1,000–1,500 words."
   },
   story: {
     label: "📖 Tell the Story",
     tag: "STORY",
     color: "#9b59b6",
     glow: "rgba(155,89,182,0.35)",
-    desc: "Compelling narrative prose from any content"
+    desc: "Compelling narrative prose from any content",
+    detail: "Transforms any web content into a compelling linear narrative. No dialogue, no visual cues — just cohesive story-style prose with a strong opening hook, developed middle, and resonant conclusion. Professional yet engaging. 800–1,400 words."
+  },
+  verbatim: {
+    label: "📄 Word for Word",
+    tag: "VERBATIM",
+    color: "#7f8c8d",
+    glow: "rgba(127,140,141,0.35)",
+    desc: "Read the source content exactly as written",
+    detail: "Outputs the fetched page content as-is — no rewriting, no creative interpretation. Cleans up formatting for readability but preserves the original words. Ideal for feeding directly into TTS or for a straight read-through of the source material."
+  },
+  summary: {
+    label: "📋 Summary",
+    tag: "SUMMARY",
+    color: "#e67e22",
+    glow: "rgba(230,126,34,0.35)",
+    desc: "Detailed overview you can embed anywhere",
+    detail: "Generates a detailed, well-structured summary of the page or site. Covers all key points, themes, and takeaways in polished prose. Scales with the source — a single page gets 300–500 words, a full multi-page site gets up to 1,500 words. Designed to be embedded as a playable audio introduction."
   }
 };
 
@@ -161,10 +181,59 @@ FORMAT: STORY NARRATIVE
 - Pure singular narrative prose only
 - Natural paragraph breaks for readability
 - Strong opening hook, developed middle, resonant conclusion
-- 800–1400 words`
+- 800–1400 words`,
+
+    summary: `You are an expert content analyst and writer. Read the provided web content thoroughly and produce a detailed, well-structured summary that captures everything important.${multiPageNote}
+
+${vibeNote}
+
+FORMAT: DETAILED SUMMARY
+- Open with a clear, engaging introduction that establishes what this content is about and why it matters
+- Cover every major point, theme, argument, and key detail from the source
+- Preserve important facts, statistics, quotes, and specific claims
+- Organise logically — group related points together with smooth transitions
+- Write in flowing prose paragraphs — no bullet points, no markdown headers, no lists
+- Close with the key takeaways and overall significance
+- This should work as a standalone audio introduction — someone listening should understand the full scope of the content without reading it
+- If multiple pages are provided, synthesise across all of them into one cohesive summary
+- Scale the length to match the source: a single blog post might need 300–500 words, a full website with multiple pages needs 1,000–1,500 words
+- Never rush or skip important content just to be brief — thoroughness matters more than brevity`
   };
 
   return formats[format];
+}
+
+/* ─── Client-side HTML→Text (for file uploads) ───────────────────────────── */
+
+function htmlToTextClient(html) {
+  let text = html;
+  text = text.replace(/<(script|style|nav|footer|header|aside|noscript|iframe|svg)[^>]*>[\s\S]*?<\/\1>/gi, " ");
+  text = text.replace(/<!--[\s\S]*?-->/g, "");
+  text = text.replace(/<\/(p|div|li|h[1-6]|tr|blockquote|section|article)>/gi, "\n");
+  text = text.replace(/<(br|hr)\s*\/?>/gi, "\n");
+  text = text.replace(/<li[^>]*>/gi, "\n• ");
+  text = text.replace(/<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi, (_, _level, content) => {
+    const clean = content.replace(/<[^>]+>/g, "").trim();
+    return `\n\n${clean.toUpperCase()}\n`;
+  });
+  text = text.replace(/<[^>]+>/g, " ");
+  text = text.replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">");
+  text = text.replace(/&quot;/gi, '"').replace(/&#39;/gi, "'");
+  text = text.replace(/&rsquo;/gi, "\u2019").replace(/&lsquo;/gi, "\u2018");
+  text = text.replace(/&rdquo;/gi, "\u201D").replace(/&ldquo;/gi, "\u201C");
+  text = text.replace(/&mdash;/gi, "\u2014").replace(/&ndash;/gi, "\u2013");
+  text = text.replace(/&#\d+;/g, "");
+  text = text.replace(/[ \t]+/g, " ").replace(/\n[ \t]+/g, "\n").replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
+
+function extractTextFromFile(content, fileName) {
+  const ext = fileName.split(".").pop().toLowerCase();
+  if (ext === "html" || ext === "htm" || content.trim().startsWith("<!") || content.trim().startsWith("<html")) {
+    return htmlToTextClient(content);
+  }
+  // For all text formats: strip any embedded HTML/script tags as a safety measure
+  return content.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "").trim();
 }
 
 /* ─── Fetch + Generate Pipeline (Task 2) ─────────────────────────────────── */
@@ -304,21 +373,27 @@ function concatAudioBuffers(buffers) {
 }
 
 /**
- * Generate podcast MP3 with distinct ElevenLabs voices for ALEX and MORGAN.
+ * Generate podcast MP3 with distinct ElevenLabs voices (parallel batches of 3).
+ * ElevenLabs has stricter rate limits so we use smaller batches.
  */
 async function generatePodcastMp3(scriptText, onProgress, voiceKey1 = "adam", voiceKey2 = "matilda") {
   const segments = parsePodcastSegments(scriptText);
   if (segments.length === 0) throw new Error("No dialogue found in script");
 
-  const audioBuffers = [];
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    if (onProgress) onProgress(`Rendering ${seg.speaker} (${i + 1}/${segments.length})...`);
-    const voiceId = seg.speaker === "MORGAN"
-      ? ELEVENLABS_VOICES[voiceKey2].id
-      : ELEVENLABS_VOICES[voiceKey1].id;
-    const buffer = await fetchTTSClip(seg.text, voiceId);
-    audioBuffers.push(buffer);
+  const BATCH = 3;
+  const audioBuffers = new Array(segments.length);
+  for (let i = 0; i < segments.length; i += BATCH) {
+    const batch = segments.slice(i, i + BATCH);
+    if (onProgress) onProgress(`Rendering segments ${i + 1}–${Math.min(i + BATCH, segments.length)} of ${segments.length}...`);
+    const results = await Promise.all(
+      batch.map((seg) => {
+        const voiceId = seg.speaker === "MORGAN"
+          ? ELEVENLABS_VOICES[voiceKey2].id
+          : ELEVENLABS_VOICES[voiceKey1].id;
+        return fetchTTSClip(seg.text, voiceId);
+      })
+    );
+    results.forEach((buf, j) => { audioBuffers[i + j] = buf; });
   }
 
   return concatAudioBuffers(audioBuffers);
@@ -371,27 +446,56 @@ async function fetchOpenAITTSClip(text, voice) {
   return await res.arrayBuffer();
 }
 
-/** Generate podcast MP3 with OpenAI voices */
+/** Generate podcast MP3 with OpenAI voices (parallel batches of 4) */
 async function generatePodcastMp3OpenAI(scriptText, onProgress, voice1 = "onyx", voice2 = "alloy") {
   const segments = parsePodcastSegments(scriptText);
   if (segments.length === 0) throw new Error("No dialogue found in script");
 
-  const audioBuffers = [];
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    if (onProgress) onProgress(`Rendering ${seg.speaker} (${i + 1}/${segments.length})...`);
-    const voice = seg.speaker === "MORGAN" ? voice2 : voice1;
-    const buffer = await fetchOpenAITTSClip(seg.text, voice);
-    audioBuffers.push(buffer);
+  const BATCH = 4;
+  const audioBuffers = new Array(segments.length);
+  for (let i = 0; i < segments.length; i += BATCH) {
+    const batch = segments.slice(i, i + BATCH);
+    if (onProgress) onProgress(`Rendering segments ${i + 1}–${Math.min(i + BATCH, segments.length)} of ${segments.length}...`);
+    const results = await Promise.all(
+      batch.map((seg, j) => {
+        const voice = seg.speaker === "MORGAN" ? voice2 : voice1;
+        return fetchOpenAITTSClip(seg.text, voice);
+      })
+    );
+    results.forEach((buf, j) => { audioBuffers[i + j] = buf; });
   }
   return concatAudioBuffers(audioBuffers);
 }
 
-/** Generate single-voice MP3 via OpenAI */
+/** Split text into chunks of roughly maxChars, breaking at sentence boundaries */
+function splitTextIntoChunks(text, maxChars = 3800) {
+  if (text.length <= maxChars) return [text];
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const chunks = [];
+  let current = "";
+  for (const s of sentences) {
+    if ((current + " " + s).length > maxChars && current) {
+      chunks.push(current.trim());
+      current = s;
+    } else {
+      current = current ? current + " " + s : s;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
+}
+
+/** Generate single-voice MP3 via OpenAI (with chunking for long scripts) */
 async function generateSingleVoiceMp3OpenAI(scriptText, format, voice1 = "onyx") {
   const cleaned = cleanScriptForTTS(scriptText, format);
-  const buffer = await fetchOpenAITTSClip(cleaned, voice1);
-  return new Blob([buffer], { type: "audio/mpeg" });
+  const chunks = splitTextIntoChunks(cleaned);
+  if (chunks.length === 1) {
+    const buffer = await fetchOpenAITTSClip(chunks[0], voice1);
+    return new Blob([buffer], { type: "audio/mpeg" });
+  }
+  // Parallel fetch all chunks
+  const buffers = await Promise.all(chunks.map(c => fetchOpenAITTSClip(c, voice1)));
+  return concatAudioBuffers(buffers);
 }
 
 async function exportToMp3OpenAI(scriptText, format, onProgress, voice1 = "onyx", voice2 = "alloy") {
@@ -412,7 +516,7 @@ async function exportToMp3OpenAI(scriptText, format, onProgress, voice1 = "onyx"
 /* ─── UI Components ───────────────────────────────────────────────────────── */
 
 function Ticker() {
-  const items = ["SERVER-SIDE FETCH","NO CORS LIMITS","URL → BROADCAST READY","VIDEO · PODCAST · TTS","POWERED BY CLAUDE AI","READS ANY PUBLIC PAGE","MP3 EXPORT VIA ELEVENLABS"];
+  const items = ["SERVER-SIDE FETCH","NO CORS LIMITS","URL → BROADCAST READY","VIDEO · PODCAST · TTS · STORY","POWERED BY SYNCSHEPHERD DIGITAL SOLUTIONS","READS ANY PUBLIC PAGE","MP3 EXPORT VIA OPENAI & ELEVENLABS"];
   return (
     <div style={{ overflow:"hidden", borderTop:`1px solid ${BRAND.borderColor}`, borderBottom:`1px solid ${BRAND.borderColor}`, background:BRAND.navy, height:30, display:"flex", alignItems:"center" }}>
       <div style={{ display:"inline-flex", gap:48, animation:"ticker 22s linear infinite", whiteSpace:"nowrap", paddingLeft:"100%" }}>
@@ -716,99 +820,6 @@ const btnS = (color, primary=false) => ({
 
 /* ─── Repo Browser (Task 3) ───────────────────────────────────────────────── */
 
-function RepoFilePicker({ selectedPages, setSelectedPages }) {
-  const [repoFiles, setRepoFiles] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    fetch("https://api.github.com/repos/syncshepherd-main/garys-garden/git/trees/main?recursive=1")
-      .then(r => r.json())
-      .then(data => {
-        const files = (data.tree || [])
-          .filter(f => f.type === "file" && /\.(html|md)$/i.test(f.path))
-          .map(f => f.path);
-        setRepoFiles(files);
-        setLoading(false);
-      })
-      .catch(err => {
-        setError("Could not load repo files: " + err.message);
-        setLoading(false);
-      });
-  }, []);
-
-  const toggle = (path) => {
-    setSelectedPages(prev =>
-      prev.includes(path) ? prev.filter(p => p !== path) : [...prev, path]
-    );
-  };
-
-  const estimatedWords = selectedPages.length * 800; // rough estimate per page
-
-  if (loading) return <div style={{ color: "#bbb", fontSize: 14, fontFamily: BRAND.monoFont, padding: "12px 0" }}>Loading repo files...</div>;
-  if (error) return <div style={{ color: "#e06050", fontSize: 12, fontFamily: BRAND.monoFont, padding: "12px 0" }}>{error}</div>;
-
-  return (
-    <div>
-      <div style={{
-        maxHeight: 220, overflowY: "auto", background: BRAND.cardBg, border: `1px solid ${BRAND.borderColor}`,
-        borderRadius: 10, padding: "8px 0",
-        scrollbarWidth: "thin", scrollbarColor: "#222 #0a0a0a"
-      }}>
-        {repoFiles.map(path => (
-          <label key={path} style={{
-            display: "flex", alignItems: "center", gap: 10, padding: "7px 14px",
-            cursor: "pointer", fontSize: 15, color: selectedPages.includes(path) ? "#e0e0e0" : "#bbb",
-            fontFamily: BRAND.monoFont, transition: "background 0.15s",
-            background: selectedPages.includes(path) ? "#1c1c1c" : "transparent",
-          }}>
-            <input
-              type="checkbox"
-              checked={selectedPages.includes(path)}
-              onChange={() => toggle(path)}
-              style={{ accentColor: "#60c860" }}
-            />
-            <span style={{ fontSize: 13, color: "#aaa", width: 32 }}>{/\.md$/i.test(path) ? "MD" : "HTML"}</span>
-            {path}
-          </label>
-        ))}
-      </div>
-      {selectedPages.length > 0 && (
-        <div style={{ fontSize: 14, color: "#bbb", fontFamily: BRAND.monoFont, marginTop: 8, paddingLeft: 2 }}>
-          {selectedPages.length} page{selectedPages.length > 1 ? "s" : ""} selected · ~{estimatedWords.toLocaleString()} words estimated
-        </div>
-      )}
-    </div>
-  );
-}
-
-/* ─── Input Mode Tab Switcher ────────────────────────────────────────────── */
-
-function InputModeTabs({ inputMode, setInputMode, color }) {
-  const tabs = [
-    { id: "url", label: "Enter URL" },
-    { id: "repo", label: "Content Library" },
-  ];
-  return (
-    <div style={{ display: "flex", gap: 0, marginBottom: 14 }}>
-      {tabs.map(tab => (
-        <button key={tab.id} onClick={() => setInputMode(tab.id)} style={{
-          flex: 1, padding: "10px 16px", cursor: "pointer",
-          background: inputMode === tab.id ? BRAND.cardBg : BRAND.darkBg,
-          border: `1px solid ${inputMode === tab.id ? color : BRAND.borderColor}`,
-          borderBottom: inputMode === tab.id ? `2px solid ${color}` : `1px solid ${BRAND.borderColor}`,
-          color: inputMode === tab.id ? color : "#bbb",
-          fontSize: 15, fontFamily: BRAND.monoFont, letterSpacing: "0.08em",
-          fontWeight: inputMode === tab.id ? 700 : 400, transition: "all 0.2s",
-          borderRadius: tab.id === "url" ? "8px 0 0 0" : "0 8px 0 0",
-        }}>
-          {tab.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 /* ─── ElevenLabs Credit Balance ───────────────────────────────────────────── */
 
 async function fetchElevenLabsBalance() {
@@ -1092,18 +1103,23 @@ function ExportMp3Unified({ output, format, meta, voiceEngine, onExportDone,
 
 export default function PageCast() {
   const [url, setUrl]                   = useState("");
+  const [inputMode, setInputMode]       = useState("url"); // "url" | "file"
+  const [uploadedFile, setUploadedFile] = useState(null);  // { name, text }
+  const [dragOver, setDragOver]         = useState(false);
   const [format, setFormat]             = useState("podcast");
   const [phase, setPhase]               = useState("idle");
   const [statusMsg, setStatus]          = useState("");
   const [output, setOutput]             = useState("");
   const [error, setError]               = useState("");
   const [copied, setCopied]             = useState(false);
-  const [inputMode, setInputMode]       = useState("url"); // url | repo
-  const [selectedPages, setSelectedPages] = useState([]);
   const [crawlLinks, setCrawlLinks]     = useState(false);
   const [sourceWordCount, setSourceWordCount] = useState(0);
   const [voiceEngine, setVoiceEngine]   = useState("openai"); // openai | elevenlabs | browser
   const [vibe, setVibe]                 = useState("professional");
+  const [lastSourceText, setLastSourceText]   = useState("");
+  const [lastIsMultiPage, setLastIsMultiPage] = useState(false);
+  const [isEditing, setIsEditing]             = useState(false);
+  const [editText, setEditText]               = useState("");
   // Voice selections: host1 = main/ALEX voice, host2 = MORGAN voice (podcast only)
   const [openaiVoice1, setOpenaiVoice1]   = useState("onyx");
   const [openaiVoice2, setOpenaiVoice2]   = useState("alloy");
@@ -1112,8 +1128,74 @@ export default function PageCast() {
   const { balance: elBalance, error: elError, refresh: refreshBalance } = useElevenLabsBalance();
   const { billing: oaiBilling } = useOpenAIBilling();
   const outputRef = useRef(null);
+  const fileInputRef = useRef(null);
   const meta = FORMAT_META[format];
   const busy = phase === "running";
+
+  // Allowed file types — extension + MIME whitelist
+  const ALLOWED_EXTENSIONS = ["txt", "html", "htm", "md", "csv", "xml", "json"];
+  const ALLOWED_MIMES = [
+    "text/plain", "text/html", "text/markdown", "text/csv", "text/xml",
+    "application/json", "application/xml", "application/xhtml+xml", "",
+  ];
+
+  const validateFile = useCallback((file) => {
+    if (!file) return "No file provided.";
+    const ext = file.name.split(".").pop().toLowerCase();
+    if (!ALLOWED_EXTENSIONS.includes(ext)) return `Unsupported file type: .${ext}. Use: ${ALLOWED_EXTENSIONS.map(e => `.${e}`).join(", ")}`;
+    if (file.type && !ALLOWED_MIMES.includes(file.type)) return `Unexpected MIME type: ${file.type}`;
+    if (file.size > 5 * 1024 * 1024) return "File too large (max 5MB).";
+    if (file.size === 0) return "File is empty.";
+    return null;
+  }, []);
+
+  const handleFileRead = useCallback((file) => {
+    const err = validateFile(file);
+    if (err) { setError(err); return; }
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const raw = e.target.result;
+      // Security: truncate excessively long files
+      const truncated = raw.length > 500000 ? raw.slice(0, 500000) : raw;
+      const text = extractTextFromFile(truncated, file.name);
+      if (!text.trim()) { setError("Could not extract text from file."); return; }
+      setUploadedFile({ name: file.name, text });
+      setError("");
+    };
+    reader.onerror = () => setError("Failed to read file.");
+    reader.readAsText(file);
+  }, [validateFile]);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragOver(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) {
+      setInputMode("file"); // auto-switch to file mode
+      handleFileRead(file);
+    }
+  }, [handleFileRead]);
+
+  const handleDragOver = useCallback((e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true); }, []);
+  const handleDragEnter = useCallback((e) => { e.preventDefault(); e.stopPropagation(); setDragOver(true); setInputMode("file"); }, []);
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault();
+    // Only leave if we actually left the container (not a child element)
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    setDragOver(false);
+  }, []);
+
+  // Prevent browser from opening dropped files anywhere on the page
+  useEffect(() => {
+    const preventDefaults = (e) => { e.preventDefault(); e.stopPropagation(); };
+    window.addEventListener("dragover", preventDefaults);
+    window.addEventListener("drop", preventDefaults);
+    return () => {
+      window.removeEventListener("dragover", preventDefaults);
+      window.removeEventListener("drop", preventDefaults);
+    };
+  }, []);
 
   const run = async () => {
     if (inputMode === "url") {
@@ -1121,25 +1203,19 @@ export default function PageCast() {
       if (!u) { setError("Please enter a URL."); return; }
       if (!u.startsWith("http")) { setError("URL must start with http:// or https://"); return; }
     } else {
-      if (selectedPages.length === 0) { setError("Select at least one page from the repo."); return; }
+      if (!uploadedFile) { setError("Please upload a file first."); return; }
     }
 
-    setError(""); setOutput(""); setPhase("running"); setSourceWordCount(0);
+    setError(""); setOutput(""); setPhase("running"); setSourceWordCount(0); setIsEditing(false);
 
     try {
       let combinedText = "";
       let isMultiPage = false;
 
-      if (inputMode === "repo") {
-        // Content Library mode — fetch each selected page via raw.githubusercontent.com
-        const total = selectedPages.length;
-        isMultiPage = total > 1;
-        for (let i = 0; i < total; i++) {
-          setStatus(`Fetching page ${i + 1} of ${total}...`);
-          const rawUrl = `https://raw.githubusercontent.com/syncshepherd-main/garys-garden/main/${selectedPages[i]}`;
-          const data = await fetchViaWorker(rawUrl);
-          combinedText += `\n\n--- PAGE BREAK: ${selectedPages[i]} ---\n\n${data.text}`;
-        }
+      if (inputMode === "file") {
+        // File upload mode — text already extracted client-side
+        setStatus("Processing uploaded file...");
+        combinedText = uploadedFile.text;
       } else if (crawlLinks) {
         // URL mode with crawl enabled
         setStatus("Fetching page and discovering links...");
@@ -1169,9 +1245,17 @@ export default function PageCast() {
 
       const srcWords = combinedText.split(/\s+/).filter(Boolean).length;
       setSourceWordCount(srcWords);
+      setLastSourceText(combinedText);
+      setLastIsMultiPage(isMultiPage);
 
-      setStatus(`Generating your ${FORMAT_META[format].tag}...`);
-      const result = await generateScript(combinedText, format, isMultiPage, vibe);
+      let result;
+      if (format === "verbatim") {
+        setStatus("Preparing content...");
+        result = combinedText.replace(/--- PAGE BREAK:.*---/g, "\n\n").replace(/\n{3,}/g, "\n\n").trim();
+      } else {
+        setStatus(`Generating your ${FORMAT_META[format].tag}...`);
+        result = await generateScript(combinedText, format, isMultiPage, vibe);
+      }
       setOutput(result);
       setPhase("done");
       setTimeout(() => outputRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 150);
@@ -1189,8 +1273,38 @@ export default function PageCast() {
     a.click();
   };
 
+  const regenerate = async () => {
+    if (!lastSourceText) return;
+    setError(""); setOutput(""); setPhase("running"); setIsEditing(false);
+    try {
+      let result;
+      if (format === "verbatim") {
+        setStatus("Preparing content...");
+        result = lastSourceText.replace(/--- PAGE BREAK:.*---/g, "\n\n").replace(/\n{3,}/g, "\n\n").trim();
+      } else {
+        setStatus(`Regenerating your ${FORMAT_META[format].tag}...`);
+        result = await generateScript(lastSourceText, format, lastIsMultiPage, vibe);
+      }
+      setOutput(result);
+      setPhase("done");
+      setTimeout(() => outputRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }), 150);
+    } catch(e) {
+      setPhase("error");
+      setError(e.message);
+    }
+  };
+
+  const saveEdit = () => {
+    setOutput(editText);
+    setIsEditing(false);
+  };
+
   return (
-    <div style={{ minHeight:"100vh", background:BRAND.darkBg, color:"#d0d0d0", fontFamily:BRAND.bodyFont }}>
+    <div
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      onDragEnter={handleDragEnter}
+      style={{ minHeight:"100vh", background:BRAND.darkBg, color:"#d0d0d0", fontFamily:BRAND.bodyFont }}>
 
       {/* top bar */}
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"0 28px", height:52, borderBottom:`1px solid ${BRAND.borderColor}`, background:BRAND.navy }}>
@@ -1210,27 +1324,79 @@ export default function PageCast() {
       <Ticker />
 
       {/* hero */}
-      <div style={{ textAlign:"center", padding:"54px 24px 44px", borderBottom:`1px solid ${BRAND.borderColor}`, position:"relative", overflow:"hidden" }}>
+      <div style={{ textAlign:"center", padding:"54px 24px 20px", position:"relative", overflow:"hidden" }}>
         <div style={{ position:"absolute", top:"60%", left:"50%", transform:"translate(-50%,-50%)", width:700, height:400,
           background:`radial-gradient(ellipse, ${BRAND.blue}10 0%, transparent 65%)`, pointerEvents:"none" }} />
         <div style={{ fontSize:13, letterSpacing:"0.3em", color:"#8899aa", fontFamily:BRAND.monoFont, marginBottom:18, textTransform:"uppercase" }}>
-          ◆ URL-to-Broadcast Engine · Server-Side Fetch
+          ◆ Content-to-Broadcast Engine
         </div>
         <h1 style={{ margin:"0 0 10px", fontSize:"clamp(38px,6vw,70px)", fontWeight:900, lineHeight:1.0, letterSpacing:"-0.02em", color:"#fff", fontFamily:BRAND.headingFont }}>
           Page<br />
           <span style={{ color:BRAND.blue, transition:"color 0.3s" }}>Cast</span>
         </h1>
-        <p style={{ fontSize:17, color:"#bcc8d4", maxWidth:500, margin:"16px auto 0", lineHeight:1.7, fontFamily:BRAND.bodyFont }}>
-          Paste any public URL or browse your Content Library. The Worker fetches the full page server-side — no browser limits, no CORS, no proxies.
+        <p style={{ fontSize:17, color:"#bcc8d4", maxWidth:540, margin:"16px auto 0", lineHeight:1.7, fontFamily:BRAND.bodyFont }}>
+          Paste a URL or upload a document and generate broadcast-ready scripts in seconds. Server-side fetch for URLs — drag-and-drop for local files.
         </p>
+      </div>
+
+      {/* Feature bar */}
+      <div style={{ display:"flex", justifyContent:"center", gap:24, flexWrap:"wrap", padding:"16px 24px 20px", borderBottom:`1px solid ${BRAND.borderColor}` }}>
+        {["Server-side fetch", "File upload", "Reads any public page", "MP3 export", "Multiple AI voices"].map((t, i) => (
+          <span key={i} style={{ fontSize:12, color:"#8899aa", fontFamily:BRAND.monoFont, letterSpacing:"0.08em", display:"flex", alignItems:"center", gap:6 }}>
+            <span style={{ color:BRAND.gold, fontSize:8 }}>●</span>{t}
+          </span>
+        ))}
+      </div>
+
+      {/* Format details section */}
+      <div style={{ maxWidth:820, margin:"0 auto", padding:"36px 24px 0" }}>
+        <div style={{ fontSize:12, letterSpacing:"0.2em", color:"#8899aa", fontFamily:BRAND.monoFont, textTransform:"uppercase", marginBottom:16, textAlign:"center" }}>
+          Output Formats
+        </div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fit, minmax(340px, 1fr))", gap:14 }}>
+          {Object.entries(FORMAT_META).map(([id, m]) => (
+            <div key={id} style={{
+              background:BRAND.cardBg, border:`1px solid ${BRAND.borderColor}`, borderRadius:10,
+              padding:"18px 20px", borderLeft:`3px solid ${m.color}`,
+            }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:8 }}>
+                <span style={{ fontSize:9, background:m.color, color:"#000", padding:"2px 8px", borderRadius:3, fontFamily:BRAND.monoFont, fontWeight:700, letterSpacing:"0.1em" }}>{m.tag}</span>
+                <span style={{ fontSize:15, color:"#e0e0e0", fontFamily:BRAND.headingFont, fontWeight:700 }}>{m.label}</span>
+              </div>
+              <p style={{ margin:0, fontSize:14, color:"#9aa8b8", lineHeight:1.7, fontFamily:BRAND.bodyFont }}>{m.detail}</p>
+            </div>
+          ))}
+        </div>
+        <div style={{ textAlign:"center", marginTop:20 }}>
+          <span style={{ fontSize:13, color:BRAND.gold, fontFamily:BRAND.headingFont, fontWeight:700, letterSpacing:"0.1em" }}>
+            Powered by SyncShepherd Digital Solutions
+          </span>
+        </div>
       </div>
 
       <div style={{ maxWidth:760, margin:"0 auto", padding:"44px 22px 0" }}>
 
-        {/* Input mode tabs */}
-        <InputModeTabs inputMode={inputMode} setInputMode={setInputMode} color={meta.color} />
+        {/* Input mode toggle */}
+        <div style={{ display:"flex", gap:0, marginBottom:16 }}>
+          {[
+            { id: "url", label: "URL", icon: "🔗" },
+            { id: "file", label: "Upload File", icon: "📄" },
+          ].map(m => (
+            <button key={m.id} onClick={() => { setInputMode(m.id); setError(""); }}
+              style={{
+                flex:1, padding:"12px 16px", border:`1px solid ${inputMode === m.id ? meta.color : BRAND.borderColor}`,
+                background: inputMode === m.id ? `${meta.color}15` : BRAND.cardBg,
+                color: inputMode === m.id ? meta.color : "#8899aa",
+                fontSize:14, fontFamily:BRAND.monoFont, cursor:"pointer", transition:"all 0.15s",
+                borderRadius: m.id === "url" ? "10px 0 0 10px" : "0 10px 10px 0",
+                fontWeight: inputMode === m.id ? 700 : 400,
+              }}>
+              {m.icon} {m.label}
+            </button>
+          ))}
+        </div>
 
-        {/* URL input (url mode) */}
+        {/* URL input */}
         {inputMode === "url" && (
           <div style={{ marginBottom:20 }}>
             <div style={{ position:"relative" }}>
@@ -1249,7 +1415,6 @@ export default function PageCast() {
                 onBlur={e => e.target.style.borderColor = BRAND.borderColor}
               />
             </div>
-            {/* Crawl links checkbox (Task 4) */}
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
               <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 15, color: "#bcc8d4", fontFamily: BRAND.monoFont }}>
                 <input
@@ -1267,10 +1432,68 @@ export default function PageCast() {
           </div>
         )}
 
-        {/* Repo file picker (repo mode — Task 3) */}
-        {inputMode === "repo" && (
-          <div style={{ marginBottom: 20 }}>
-            <RepoFilePicker selectedPages={selectedPages} setSelectedPages={setSelectedPages} />
+        {/* File upload / drag-and-drop */}
+        {inputMode === "file" && (
+          <div style={{ marginBottom:20 }}>
+            <div
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onDragEnter={handleDragEnter}
+              onDragLeave={handleDragLeave}
+              onClick={() => !busy && fileInputRef.current?.click()}
+              style={{
+                border: `2px dashed ${dragOver ? meta.color : uploadedFile ? "#3a5a3a" : BRAND.borderColor}`,
+                borderRadius: 12,
+                padding: uploadedFile ? "20px 24px" : "40px 24px",
+                textAlign: "center",
+                cursor: busy ? "not-allowed" : "pointer",
+                background: dragOver ? `${meta.color}08` : uploadedFile ? `${BRAND.cardBg}` : BRAND.cardBg,
+                transition: "all 0.2s",
+              }}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".txt,.html,.htm,.md,.csv,.xml,.json"
+                style={{ display: "none" }}
+                onChange={e => { if (e.target.files?.[0]) handleFileRead(e.target.files[0]); }}
+              />
+              {uploadedFile ? (
+                <div>
+                  <div style={{ fontSize:15, color:"#e0e0e0", fontFamily:BRAND.monoFont, marginBottom:6 }}>
+                    {uploadedFile.name}
+                  </div>
+                  <div style={{ fontSize:13, color:"#8899aa", fontFamily:BRAND.monoFont }}>
+                    {uploadedFile.text.split(/\s+/).filter(Boolean).length.toLocaleString()} words extracted
+                  </div>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setUploadedFile(null); }}
+                    style={{
+                      marginTop:10, padding:"4px 14px", fontSize:12, fontFamily:BRAND.monoFont,
+                      background:"transparent", border:`1px solid #555`, borderRadius:6,
+                      color:"#999", cursor:"pointer",
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ) : (
+                <div>
+                  <div style={{ fontSize:32, marginBottom:10 }}>
+                    {dragOver ? "+" : ""}
+                  </div>
+                  <div style={{ fontSize:16, color:"#bcc8d4", fontFamily:BRAND.monoFont, marginBottom:8 }}>
+                    {dragOver ? "Drop it here!" : "Drag & drop a file here"}
+                  </div>
+                  <div style={{ fontSize:13, color:"#8899aa", fontFamily:BRAND.monoFont, marginBottom:12 }}>
+                    or click to browse
+                  </div>
+                  <div style={{ fontSize:12, color:"#667788", fontFamily:BRAND.monoFont }}>
+                    Supports: .html, .htm, .txt, .md, .csv, .xml, .json — max 5MB
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -1324,7 +1547,7 @@ export default function PageCast() {
           transition:"all 0.2s", boxShadow: busy ? "none" : `0 0 30px ${meta.glow}`,
           marginBottom:10, marginTop:16
         }}>
-          {busy ? `● ${statusMsg}` : `▶  GENERATE ${meta.tag}`}
+          {busy ? `● ${statusMsg}` : `▶  GENERATE ${meta.tag}${inputMode === "file" && uploadedFile ? ` FROM FILE` : ""}`}
         </button>
 
         {/* progress bar */}
@@ -1366,7 +1589,18 @@ export default function PageCast() {
             <div style={{ display:"flex", gap:8, flexWrap: "wrap", alignItems:"center" }}>
               <button onClick={copy}     style={btnS(meta.color)}>{copied ? "✓ Copied" : "⎘ Copy"}</button>
               <button onClick={download} style={btnS(meta.color)}>↓ Download</button>
-              <button onClick={()=>{setPhase("idle");setOutput("");setError("");setSourceWordCount(0);}} style={btnS("#282828")}>↺ New</button>
+              {lastSourceText && !isEditing && (
+                <button onClick={regenerate} disabled={busy} style={btnS("#9b59b6")}>⟳ Regenerate</button>
+              )}
+              {isEditing ? (
+                <button onClick={saveEdit} style={btnS("#27ae60")}>✓ Save Edit</button>
+              ) : (
+                <button onClick={() => { setEditText(output); setIsEditing(true); }} style={btnS("#e67e22")}>✎ Edit</button>
+              )}
+              {isEditing && (
+                <button onClick={() => setIsEditing(false)} style={btnS("#282828")}>✕ Cancel</button>
+              )}
+              <button onClick={()=>{setPhase("idle");setOutput("");setError("");setSourceWordCount(0);setIsEditing(false);}} style={btnS("#282828")}>↺ New</button>
             </div>
             {/* Voice engine selector */}
             <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} oaiBilling={oaiBilling} output={output} format={format}
@@ -1384,14 +1618,27 @@ export default function PageCast() {
             openaiVoice1={openaiVoice1} openaiVoice2={openaiVoice2}
             elevenVoice1={elevenVoice1} elevenVoice2={elevenVoice2} />
 
-          {/* script viewer */}
-          <div style={{ background:BRAND.cardBg, border:`1px solid ${BRAND.borderColor}`, borderRadius:14, overflow:"hidden", boxShadow:"0 4px 50px rgba(0,0,0,0.6)" }}>
+          {/* script viewer / editor */}
+          <div style={{ background:BRAND.cardBg, border:`1px solid ${isEditing ? "#e67e22" : BRAND.borderColor}`, borderRadius:14, overflow:"hidden", boxShadow:"0 4px 50px rgba(0,0,0,0.6)", transition:"border-color 0.2s" }}>
             <div style={{ background:BRAND.navy, borderBottom:`1px solid ${BRAND.borderColor}`, padding:"10px 24px", display:"flex", alignItems:"center", gap:10 }}>
-              <span style={{ fontSize:9, background:meta.color, color:"#000", padding:"2px 8px", borderRadius:3, fontFamily:BRAND.monoFont, fontWeight:700, letterSpacing:"0.1em" }}>{meta.tag}</span>
-              {format==="podcast" && <span style={{ fontSize:14, color:"#bbb", fontFamily:BRAND.monoFont }}>ALEX <span style={{color:BRAND.blue}}>●</span>  MORGAN <span style={{color:BRAND.gold}}>●</span></span>}
-              {format==="video"   && <span style={{ fontSize:14, color:"#bbb", fontFamily:BRAND.monoFont }}>[VISUAL CUES] highlighted</span>}
+              <span style={{ fontSize:9, background: isEditing ? "#e67e22" : meta.color, color:"#000", padding:"2px 8px", borderRadius:3, fontFamily:BRAND.monoFont, fontWeight:700, letterSpacing:"0.1em" }}>{isEditing ? "EDITING" : meta.tag}</span>
+              {!isEditing && format==="podcast" && <span style={{ fontSize:14, color:"#bbb", fontFamily:BRAND.monoFont }}>ALEX <span style={{color:BRAND.blue}}>●</span>  MORGAN <span style={{color:BRAND.gold}}>●</span></span>}
+              {!isEditing && format==="video"   && <span style={{ fontSize:14, color:"#bbb", fontFamily:BRAND.monoFont }}>[VISUAL CUES] highlighted</span>}
+              {isEditing && <span style={{ fontSize:13, color:"#e67e22", fontFamily:BRAND.monoFont }}>Edit your transcript below — audio will re-render from the saved text</span>}
             </div>
-            <ScriptBlock content={output} format={format} />
+            {isEditing ? (
+              <textarea
+                value={editText}
+                onChange={e => setEditText(e.target.value)}
+                style={{
+                  width:"100%", minHeight:400, padding:"20px 24px", background:BRAND.cardBg, color:"#d0d0d0",
+                  border:"none", outline:"none", resize:"vertical", fontSize:15, lineHeight:1.8,
+                  fontFamily:BRAND.monoFont, boxSizing:"border-box"
+                }}
+              />
+            ) : (
+              <ScriptBlock content={output} format={format} />
+            )}
           </div>
         </div>
       )}
