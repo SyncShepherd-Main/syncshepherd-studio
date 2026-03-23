@@ -16,17 +16,28 @@
 
 const MAX_TEXT_LENGTH = 15000;
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
+const ALLOWED_ORIGINS = [
+  "https://pagecast-a6g.pages.dev",
+  "http://localhost:5173",
+];
+
+function getCorsHeaders(request) {
+  const origin = request.headers.get("Origin") || "";
+  const allowedOrigin = ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
+  return {
+    "Access-Control-Allow-Origin": allowedOrigin,
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+}
 
 export default {
   async fetch(request, env) {
+    const cors = getCorsHeaders(request);
+
     // Handle CORS preflight
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return new Response(null, { status: 204, headers: cors });
     }
 
     const url = new URL(request.url);
@@ -34,55 +45,55 @@ export default {
 
     // Route: POST /generate — Anthropic API proxy
     if (request.method === "POST" && path === "/generate") {
-      return handleGenerate(request, env);
+      return handleGenerate(request, env, cors);
     }
 
     // Route: POST /tts — ElevenLabs TTS proxy
     if (request.method === "POST" && path === "/tts") {
-      return handleTTS(request, env);
+      return handleTTS(request, env, cors);
     }
 
     // Route: POST /tts-openai — OpenAI TTS proxy
     if (request.method === "POST" && path === "/tts-openai") {
-      return handleTTSOpenAI(request, env);
+      return handleTTSOpenAI(request, env, cors);
     }
 
     // Route: GET /subscription — ElevenLabs subscription/usage info
     if (request.method === "GET" && path === "/subscription") {
-      return handleSubscription(env);
+      return handleSubscription(env, cors);
     }
 
     // Route: GET /openai-billing — OpenAI billing/usage info
     if (request.method === "GET" && path === "/openai-billing") {
-      return handleOpenAIBilling(url, env);
+      return handleOpenAIBilling(url, env, cors);
     }
 
     // Route: GET /?url= — Fetch proxy (original)
     if (request.method === "GET") {
-      return handleFetch(url);
+      return handleFetch(url, cors);
     }
 
-    return jsonResponse({ error: "Not found" }, 404);
+    return jsonResponse({ error: "Not found" }, 404, cors);
   },
 };
 
 /* ─── /generate — Anthropic Messages API Proxy ────────────────────────────── */
 
-async function handleGenerate(request, env) {
+async function handleGenerate(request, env, cors) {
   if (!env.ANTHROPIC_API_KEY) {
-    return jsonResponse({ error: "ANTHROPIC_API_KEY not configured on worker" }, 500);
+    return jsonResponse({ error: "ANTHROPIC_API_KEY not configured on worker" }, 500, cors);
   }
 
   let body;
   try {
     body = await request.json();
   } catch {
-    return jsonResponse({ error: "Invalid JSON body" }, 400);
+    return jsonResponse({ error: "Invalid JSON body" }, 400, cors);
   }
 
   const { model, max_tokens, system, messages } = body;
   if (!messages || !Array.isArray(messages)) {
-    return jsonResponse({ error: "Missing messages array" }, 400);
+    return jsonResponse({ error: "Missing messages array" }, 400, cors);
   }
 
   try {
@@ -103,31 +114,31 @@ async function handleGenerate(request, env) {
 
     const data = await res.json();
     if (!res.ok) {
-      return jsonResponse({ error: data?.error?.message || `Anthropic API error ${res.status}` }, res.status);
+      return jsonResponse({ error: data?.error?.message || `Anthropic API error ${res.status}` }, res.status, cors);
     }
-    return jsonResponse(data, 200);
+    return jsonResponse(data, 200, cors);
   } catch (err) {
-    return jsonResponse({ error: `Anthropic proxy error: ${err.message}` }, 500);
+    return jsonResponse({ error: `Anthropic proxy error: ${err.message}` }, 500, cors);
   }
 }
 
 /* ─── /tts — ElevenLabs TTS Proxy ─────────────────────────────────────────── */
 
-async function handleTTS(request, env) {
+async function handleTTS(request, env, cors) {
   if (!env.ELEVENLABS_API_KEY) {
-    return jsonResponse({ error: "ELEVENLABS_API_KEY not configured on worker" }, 500);
+    return jsonResponse({ error: "ELEVENLABS_API_KEY not configured on worker" }, 500, cors);
   }
 
   let body;
   try {
     body = await request.json();
   } catch {
-    return jsonResponse({ error: "Invalid JSON body" }, 400);
+    return jsonResponse({ error: "Invalid JSON body" }, 400, cors);
   }
 
   const { text, voice_id, model_id, voice_settings } = body;
   if (!text || !voice_id) {
-    return jsonResponse({ error: "Missing text or voice_id" }, 400);
+    return jsonResponse({ error: "Missing text or voice_id" }, 400, cors);
   }
 
   try {
@@ -147,7 +158,7 @@ async function handleTTS(request, env) {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
-      return jsonResponse({ error: err?.detail?.message || err?.detail || `ElevenLabs error ${res.status}` }, res.status);
+      return jsonResponse({ error: err?.detail?.message || err?.detail || `ElevenLabs error ${res.status}` }, res.status, cors);
     }
 
     // Stream the audio back
@@ -155,31 +166,31 @@ async function handleTTS(request, env) {
       status: 200,
       headers: {
         "Content-Type": "audio/mpeg",
-        ...CORS_HEADERS,
+        ...cors,
       },
     });
   } catch (err) {
-    return jsonResponse({ error: `ElevenLabs proxy error: ${err.message}` }, 500);
+    return jsonResponse({ error: `ElevenLabs proxy error: ${err.message}` }, 500, cors);
   }
 }
 
 /* ─── /tts-openai — OpenAI TTS Proxy ──────────────────────────────────────── */
 
-async function handleTTSOpenAI(request, env) {
+async function handleTTSOpenAI(request, env, cors) {
   if (!env.OPENAI_API_KEY) {
-    return jsonResponse({ error: "OPENAI_API_KEY not configured on worker" }, 500);
+    return jsonResponse({ error: "OPENAI_API_KEY not configured on worker" }, 500, cors);
   }
 
   let body;
   try {
     body = await request.json();
   } catch {
-    return jsonResponse({ error: "Invalid JSON body" }, 400);
+    return jsonResponse({ error: "Invalid JSON body" }, 400, cors);
   }
 
   const { text, voice, model } = body;
   if (!text) {
-    return jsonResponse({ error: "Missing text" }, 400);
+    return jsonResponse({ error: "Missing text" }, 400, cors);
   }
 
   try {
@@ -198,26 +209,26 @@ async function handleTTSOpenAI(request, env) {
 
     if (!res.ok) {
       const err = await res.json().catch(() => ({ error: { message: `HTTP ${res.status}` } }));
-      return jsonResponse({ error: err?.error?.message || `OpenAI TTS error ${res.status}` }, res.status);
+      return jsonResponse({ error: err?.error?.message || `OpenAI TTS error ${res.status}` }, res.status, cors);
     }
 
     return new Response(res.body, {
       status: 200,
       headers: {
         "Content-Type": "audio/mpeg",
-        ...CORS_HEADERS,
+        ...cors,
       },
     });
   } catch (err) {
-    return jsonResponse({ error: `OpenAI TTS proxy error: ${err.message}` }, 500);
+    return jsonResponse({ error: `OpenAI TTS proxy error: ${err.message}` }, 500, cors);
   }
 }
 
 /* ─── /openai-billing — OpenAI Usage & Balance ─────────────────────────────── */
 
-async function handleOpenAIBilling(url, env) {
+async function handleOpenAIBilling(url, env, cors) {
   if (!env.OPENAI_API_KEY) {
-    return jsonResponse({ error: "OPENAI_API_KEY not configured on worker" }, 500);
+    return jsonResponse({ error: "OPENAI_API_KEY not configured on worker" }, 500, cors);
   }
 
   const headers = {
@@ -274,18 +285,18 @@ async function handleOpenAIBilling(url, env) {
 
   // If neither worked, return what we can
   if (result.monthly_cost === null && result.balance === null) {
-    return jsonResponse({ error: "Billing info unavailable — API key may lack org permissions", rate: 0.015 }, 200);
+    return jsonResponse({ error: "Billing info unavailable — API key may lack org permissions", rate: 0.015 }, 200, cors);
   }
 
   result.rate = 0.015; // $0.015 per 1K chars for tts-1
-  return jsonResponse(result, 200);
+  return jsonResponse(result, 200, cors);
 }
 
 /* ─── /subscription — ElevenLabs Usage Info ────────────────────────────────── */
 
-async function handleSubscription(env) {
+async function handleSubscription(env, cors) {
   if (!env.ELEVENLABS_API_KEY) {
-    return jsonResponse({ error: "ELEVENLABS_API_KEY not configured on worker" }, 500);
+    return jsonResponse({ error: "ELEVENLABS_API_KEY not configured on worker" }, 500, cors);
   }
 
   try {
@@ -294,31 +305,31 @@ async function handleSubscription(env) {
     });
 
     if (!res.ok) {
-      return jsonResponse({ error: `ElevenLabs API error ${res.status}` }, res.status);
+      return jsonResponse({ error: `ElevenLabs API error ${res.status}` }, res.status, cors);
     }
 
     const data = await res.json();
     return jsonResponse({
       character_count: data.character_count,
       character_limit: data.character_limit,
-    }, 200);
+    }, 200, cors);
   } catch (err) {
-    return jsonResponse({ error: `ElevenLabs subscription error: ${err.message}` }, 500);
+    return jsonResponse({ error: `ElevenLabs subscription error: ${err.message}` }, 500, cors);
   }
 }
 
 /* ─── GET /?url= — Fetch Proxy (original) ─────────────────────────────────── */
 
-async function handleFetch(url) {
+async function handleFetch(url, cors) {
   const targetUrl = url.searchParams.get("url");
   const includeLinks = url.searchParams.get("links") === "true";
 
   if (!targetUrl) {
-    return jsonResponse({ error: "Missing ?url= parameter" }, 400);
+    return jsonResponse({ error: "Missing ?url= parameter" }, 400, cors);
   }
 
   if (!targetUrl.startsWith("https://") && !targetUrl.startsWith("http://")) {
-    return jsonResponse({ error: "URL must start with http:// or https://" }, 400);
+    return jsonResponse({ error: "URL must start with http:// or https://" }, 400, cors);
   }
 
   try {
@@ -366,9 +377,9 @@ async function handleFetch(url) {
       result.links = links;
     }
 
-    return jsonResponse(result, 200);
+    return jsonResponse(result, 200, cors);
   } catch (err) {
-    return jsonResponse({ error: `Fetch failed: ${err.message}` }, 400);
+    return jsonResponse({ error: `Fetch failed: ${err.message}` }, 400, cors);
   }
 }
 
@@ -428,12 +439,12 @@ function extractInternalLinks(html, sourceUrl) {
   return [...links];
 }
 
-function jsonResponse(data, status) {
+function jsonResponse(data, status, cors = {}) {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json",
-      ...CORS_HEADERS,
+      ...cors,
     },
   });
 }
