@@ -409,6 +409,164 @@ async function exportToMp3OpenAI(scriptText, format, onProgress, voice1 = "onyx"
   URL.revokeObjectURL(url);
 }
 
+/* ─── PDF → Audio ────────────────────────────────────────────────────────── */
+
+const TTS_CHUNK_CHARS = 4000;          // OpenAI TTS hard limit is 4,096 chars per request
+const PDF_MAX_BYTES = 50 * 1024 * 1024;
+const PDF_SCRIPT_MAX_CHARS = 150000;   // cap when feeding a PDF to Claude for a script
+
+/** Extract plain text from a PDF in the browser (pdf.js, loaded on demand) */
+async function extractPdfText(file, onProgress) {
+  const pdfjs = await import("pdfjs-dist");
+  const { default: workerUrl } = await import("pdfjs-dist/build/pdf.worker.min.mjs?url");
+  pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+
+  const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
+  const pages = []; // [{ page, text }]
+  for (let i = 1; i <= pdf.numPages; i++) {
+    if (onProgress) onProgress(`Reading page ${i} of ${pdf.numPages}...`);
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    const raw = content.items.map(it => (it.str || "") + (it.hasEOL ? "\n" : "")).join("");
+    const text = raw
+      .replace(/(\w)-\n(\w)/g, "$1$2")   // re-join words hyphenated across lines
+      .replace(/\s+/g, " ")
+      .trim();
+    if (text) pages.push({ page: i, text });
+  }
+
+  const text = pages.map(p => p.text).join("\n\n");
+  if (text.replace(/\s/g, "").length < 20) {
+    throw new Error("No readable text found. This PDF is probably a scanned image — it needs OCR first.");
+  }
+  return {
+    name: file.name,
+    file,
+    text,
+    sentences: splitIntoSentences(pages),
+    pages: pdf.numPages,
+    words: text.split(/\s+/).filter(Boolean).length,
+    chars: text.length,
+  };
+}
+
+/** Split page texts into sentences tagged with their page (each ≤ max chars) */
+function splitIntoSentences(pages, max = TTS_CHUNK_CHARS) {
+  const out = [];
+  for (const { page, text } of pages) {
+    for (let s of text.split(/(?<=[.!?])\s+/)) {
+      // A single "sentence" longer than the limit (tables, lists) gets split on spaces
+      while (s.length > max) {
+        const cut = s.lastIndexOf(" ", max) > 0 ? s.lastIndexOf(" ", max) : max;
+        out.push({ page, text: s.slice(0, cut).trim() });
+        s = s.slice(cut).trim();
+      }
+      if (s) out.push({ page, text: s });
+    }
+  }
+  return out;
+}
+
+/** Group sentences into TTS-sized chunks: returns arrays of sentence indexes */
+function chunkSentences(sentences, max = TTS_CHUNK_CHARS) {
+  const chunks = [];
+  let current = [], len = 0;
+  sentences.forEach((s, i) => {
+    if (current.length && len + 1 + s.text.length > max) { chunks.push(current); current = []; len = 0; }
+    current.push(i);
+    len += (len ? 1 : 0) + s.text.length;
+  });
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
+/** Decoded duration of an MP3 clip in seconds (0 if the browser can't decode it) */
+async function clipDuration(ctx, buffer) {
+  try { return (await ctx.decodeAudioData(buffer.slice(0))).duration; }
+  catch { return 0; }
+}
+
+/** Run fn over items with limited concurrency, keeping result order */
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Render sentences of any total length to one MP3 in a single voice (OpenAI or ElevenLabs).
+ * Returns { blob, segments } — segments are [{ t, page, text }] start times for read-along.
+ */
+async function renderLongTextMp3(sentences, engine, voice, onProgress) {
+  const groups = chunkSentences(sentences);
+  const chunks = groups.map(g => g.map(i => sentences[i].text).join(" "));
+  let done = 0;
+  const fetchClip = (chunk) => engine === "openai"
+    ? fetchOpenAITTSClip(chunk, voice)
+    : fetchTTSClip(chunk, ELEVENLABS_VOICES[voice].id);
+
+  const buffers = await mapLimit(chunks, engine === "openai" ? 3 : 2, async (chunk) => {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const buf = await fetchClip(chunk);
+        done++;
+        if (onProgress) onProgress(`Rendering audio ${done} of ${chunks.length}...`);
+        return buf;
+      } catch (err) {
+        lastErr = err;
+        await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  });
+
+  // Timestamps: each chunk's real duration, split across its sentences by length
+  if (onProgress) onProgress("Timing read-along...");
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const segments = [];
+  let t = 0;
+  for (let c = 0; c < groups.length; c++) {
+    const dur = await clipDuration(ctx, buffers[c]);
+    const total = groups[c].reduce((n, i) => n + sentences[i].text.length, 0) || 1;
+    for (const i of groups[c]) {
+      segments.push({ t: Math.round(t * 100) / 100, page: sentences[i].page, text: sentences[i].text });
+      t += dur * sentences[i].text.length / total;
+    }
+  }
+  ctx.close();
+
+  return { blob: concatAudioBuffers(buffers), segments };
+}
+
+/** Upload PDF + MP3 + read-along timings; returns the public share URL */
+async function createSharePage({ pdfFile, audioBlob, title, voice, segments }) {
+  const form = new FormData();
+  form.append("pdf", pdfFile, pdfFile.name);
+  form.append("audio", audioBlob, "audio.mp3");
+  form.append("meta", JSON.stringify({ title, voice, segments }));
+  const res = await fetch(`${WORKER_URL}/share`, { method: "POST", body: form });
+  const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (!res.ok || data.error) throw new Error(data.error || `Share error ${res.status}`);
+  return data.url;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 /* ─── UI Components ───────────────────────────────────────────────────────── */
 
 function Ticker() {
@@ -788,10 +946,11 @@ function InputModeTabs({ inputMode, setInputMode, color }) {
   const tabs = [
     { id: "url", label: "Enter URL" },
     { id: "repo", label: "Content Library" },
+    { id: "pdf", label: "Upload PDF" },
   ];
   return (
     <div style={{ display: "flex", gap: 0, marginBottom: 14 }}>
-      {tabs.map(tab => (
+      {tabs.map((tab, i) => (
         <button key={tab.id} onClick={() => setInputMode(tab.id)} style={{
           flex: 1, padding: "10px 16px", cursor: "pointer",
           background: inputMode === tab.id ? BRAND.cardBg : BRAND.darkBg,
@@ -800,11 +959,145 @@ function InputModeTabs({ inputMode, setInputMode, color }) {
           color: inputMode === tab.id ? color : "#bbb",
           fontSize: 15, fontFamily: BRAND.monoFont, letterSpacing: "0.08em",
           fontWeight: inputMode === tab.id ? 700 : 400, transition: "all 0.2s",
-          borderRadius: tab.id === "url" ? "8px 0 0 0" : "0 8px 0 0",
+          borderRadius: i === 0 ? "8px 0 0 0" : i === tabs.length - 1 ? "0 8px 0 0" : 0,
         }}>
           {tab.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+/* ─── PDF Drop Zone ──────────────────────────────────────────────────────── */
+
+function PdfDropZone({ pdfDoc, pdfStatus, pdfMsg, onFile, disabled, color }) {
+  const inputRef = useRef(null);
+  const [over, setOver] = useState(false);
+
+  // Catch drops anywhere on the page, so a near-miss doesn't open the PDF in the tab
+  useEffect(() => {
+    const isFileDrag = e => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+    const onDragOver = e => { if (isFileDrag(e)) e.preventDefault(); };
+    const onDrop = e => {
+      if (!isFileDrag(e)) return;
+      e.preventDefault();
+      setOver(false);
+      const file = e.dataTransfer.files?.[0];
+      if (file && !disabled) onFile(file);
+    };
+    window.addEventListener("dragover", onDragOver);
+    window.addEventListener("drop", onDrop);
+    return () => {
+      window.removeEventListener("dragover", onDragOver);
+      window.removeEventListener("drop", onDrop);
+    };
+  }, [onFile, disabled]);
+
+  const reading = pdfStatus === "reading";
+
+  return (
+    <div
+      onClick={() => !disabled && !reading && inputRef.current?.click()}
+      onDragEnter={() => setOver(true)}
+      onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setOver(false); }}
+      style={{
+        border: `2px dashed ${over ? color : BRAND.borderColor}`, borderRadius: 10,
+        background: over ? `${color}12` : BRAND.cardBg,
+        padding: "28px 20px", textAlign: "center", cursor: disabled || reading ? "wait" : "pointer",
+        transition: "all 0.2s",
+      }}
+    >
+      <input
+        ref={inputRef} type="file" accept="application/pdf,.pdf" style={{ display: "none" }}
+        onChange={e => { const f = e.target.files?.[0]; if (f) onFile(f); e.target.value = ""; }}
+      />
+      {reading ? (
+        <div style={{ fontSize: 15, color, fontFamily: BRAND.monoFont }}>{pdfMsg || "Reading PDF..."}</div>
+      ) : pdfDoc ? (
+        <>
+          <div style={{ fontSize: 16, color: "#e0e0e0", fontFamily: BRAND.monoFont, marginBottom: 6, wordBreak: "break-all" }}>📄 {pdfDoc.name}</div>
+          <div style={{ fontSize: 14, color: "#bcc8d4", fontFamily: BRAND.monoFont }}>
+            {pdfDoc.pages} page{pdfDoc.pages > 1 ? "s" : ""} · {pdfDoc.words.toLocaleString()} words · {pdfDoc.chars.toLocaleString()} characters
+          </div>
+          <div style={{ fontSize: 13, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 8 }}>Drop another PDF or click to replace</div>
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize: 28, marginBottom: 8 }}>📄</div>
+          <div style={{ fontSize: 16, color: "#e0e0e0", fontFamily: BRAND.monoFont }}>Drop a PDF here or click to browse</div>
+          <div style={{ fontSize: 13, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 6 }}>Text is read in your browser · PDFs with selectable text (not scans) · up to 50 MB</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SharePageButton({ pdfDoc, pdfAudio, color }) {
+  const [status, setStatus] = useState("idle"); // idle | uploading | done | error
+  const [shareUrl, setShareUrl] = useState("");
+  const [err, setErr] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  // A new render means a new share page
+  useEffect(() => { setStatus("idle"); setShareUrl(""); setErr(""); }, [pdfAudio]);
+
+  const create = async () => {
+    setStatus("uploading"); setErr("");
+    try {
+      const url = await createSharePage({
+        pdfFile: pdfDoc.file,
+        audioBlob: pdfAudio.blob,
+        title: pdfDoc.name.replace(/\.pdf$/i, ""),
+        voice: pdfAudio.voice,
+        segments: pdfAudio.segments,
+      });
+      setShareUrl(url); setStatus("done");
+    } catch (e) {
+      setErr(e.message); setStatus("error");
+    }
+  };
+
+  const copy = () => { navigator.clipboard.writeText(shareUrl); setCopied(true); setTimeout(() => setCopied(false), 2200); };
+
+  return (
+    <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BRAND.borderColor}` }}>
+      {status === "done" ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <a href={shareUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 14, color, fontFamily: BRAND.monoFont, wordBreak: "break-all", flex: "1 1 260px" }}>{shareUrl}</a>
+          <button onClick={copy} style={btnS(color)}>{copied ? "✓ Copied" : "⎘ Copy link"}</button>
+        </div>
+      ) : (
+        <button onClick={create} disabled={status === "uploading"} style={{ ...btnS(color, status !== "uploading"), opacity: status === "uploading" ? 0.5 : 1, cursor: status === "uploading" ? "wait" : "pointer" }}>
+          {status === "uploading" ? "Uploading..." : status === "error" ? "⚠ Retry share page" : "🔗 Create share page"}
+        </button>
+      )}
+      <div style={{ fontSize: 13, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 8 }}>
+        {status === "error" ? <span style={{ color: "#e06050" }}>Share error: {err}</span>
+          : "Listen + read-along page with the original PDF. Anyone with the link can open it."}
+      </div>
+    </div>
+  );
+}
+
+function PdfAudioEstimate({ pdfDoc, voiceEngine, elBalance }) {
+  if (!pdfDoc) return null;
+  const chars = pdfDoc.chars;
+  const mins = Math.max(1, Math.round(pdfDoc.words / 150));
+  const style = { fontSize: 14, fontFamily: BRAND.monoFont, marginTop: 10, paddingLeft: 2 };
+
+  if (voiceEngine === "browser") {
+    return <div style={{ ...style, color: "#e0a030" }}>Browser Voice can't make an audio file. Pick OpenAI or ElevenLabs to download an MP3.</div>;
+  }
+  if (voiceEngine === "openai") {
+    return <div style={{ ...style, color: "#10a37f" }}>~{mins} min of audio · est. OpenAI cost ${(chars / 1000 * 0.015).toFixed(2)}</div>;
+  }
+  const remaining = elBalance ? elBalance.character_limit - elBalance.character_count : null;
+  const short = remaining != null && chars > remaining;
+  return (
+    <div style={{ ...style, color: short ? "#e05050" : "#f0a030" }}>
+      ~{mins} min of audio · uses ~{chars.toLocaleString()} ElevenLabs characters
+      {remaining != null && <> of {remaining.toLocaleString()} remaining</>}
+      {short && " — not enough credit for the whole PDF"}
     </div>
   );
 }
@@ -1111,12 +1404,57 @@ export default function PageCast() {
   const [elevenVoice2, setElevenVoice2]   = useState("matilda");
   const { balance: elBalance, error: elError, refresh: refreshBalance } = useElevenLabsBalance();
   const { billing: oaiBilling } = useOpenAIBilling();
+  // PDF input: pdfMode "verbatim" reads the PDF as-is, "script" feeds it to the selected format
+  const [pdfDoc, setPdfDoc]             = useState(null);
+  const [pdfStatus, setPdfStatus]       = useState("idle"); // idle | reading | ready | error
+  const [pdfMsg, setPdfMsg]             = useState("");
+  const [pdfMode, setPdfMode]           = useState("verbatim");
+  const [pdfAudio, setPdfAudio]         = useState(null);   // { url, name }
   const outputRef = useRef(null);
   const meta = FORMAT_META[format];
   const busy = phase === "running";
+  const pdfVerbatim = inputMode === "pdf" && pdfMode === "verbatim";
+
+  const handlePdfFile = useCallback(async (file) => {
+    if (!(file.type === "application/pdf" || /\.pdf$/i.test(file.name))) {
+      setError("That file isn't a PDF."); return;
+    }
+    if (file.size > PDF_MAX_BYTES) {
+      setError("That PDF is over 50 MB."); return;
+    }
+    setError(""); setPdfStatus("reading"); setPdfMsg("Reading PDF...");
+    setPdfAudio(prev => { if (prev) URL.revokeObjectURL(prev.url); return null; });
+    try {
+      const doc = await extractPdfText(file, setPdfMsg);
+      setPdfDoc(doc); setPdfStatus("ready");
+    } catch (e) {
+      setPdfDoc(null); setPdfStatus("error"); setError(e.message);
+    }
+  }, []);
+
+  const renderPdfAudio = async () => {
+    if (voiceEngine === "browser") { setError("Browser Voice can't make an audio file. Pick OpenAI or ElevenLabs."); return; }
+    setError(""); setPhase("running"); setStatus("Rendering audio...");
+    setPdfAudio(prev => { if (prev) URL.revokeObjectURL(prev.url); return null; });
+    try {
+      const voice = voiceEngine === "openai" ? openaiVoice1 : elevenVoice1;
+      const { blob, segments } = await renderLongTextMp3(pdfDoc.sentences, voiceEngine, voice, setStatus);
+      const name = `${pdfDoc.name.replace(/\.pdf$/i, "")}-${voice}.mp3`;
+      downloadBlob(blob, name);
+      setPdfAudio({ url: URL.createObjectURL(blob), name, blob, segments, voice });
+      setPhase("idle");
+      if (voiceEngine === "elevenlabs") refreshBalance();
+    } catch (e) {
+      setPhase("error");
+      setError(e.message);
+    }
+  };
 
   const run = async () => {
-    if (inputMode === "url") {
+    if (inputMode === "pdf") {
+      if (!pdfDoc) { setError("Drop a PDF first."); return; }
+      if (pdfMode === "verbatim") return renderPdfAudio();
+    } else if (inputMode === "url") {
       const u = url.trim();
       if (!u) { setError("Please enter a URL."); return; }
       if (!u.startsWith("http")) { setError("URL must start with http:// or https://"); return; }
@@ -1130,7 +1468,12 @@ export default function PageCast() {
       let combinedText = "";
       let isMultiPage = false;
 
-      if (inputMode === "repo") {
+      if (inputMode === "pdf") {
+        // PDF mode — text already extracted in the browser
+        combinedText = pdfDoc.text.length > PDF_SCRIPT_MAX_CHARS
+          ? pdfDoc.text.slice(0, PDF_SCRIPT_MAX_CHARS) + "\n\n[Content truncated at 150,000 characters]"
+          : pdfDoc.text;
+      } else if (inputMode === "repo") {
         // Content Library mode — fetch each selected page via raw.githubusercontent.com
         const total = selectedPages.length;
         isMultiPage = total > 1;
@@ -1274,7 +1617,33 @@ export default function PageCast() {
           </div>
         )}
 
+        {/* PDF drop zone (pdf mode) */}
+        {inputMode === "pdf" && (
+          <div style={{ marginBottom: 20 }}>
+            <PdfDropZone pdfDoc={pdfDoc} pdfStatus={pdfStatus} pdfMsg={pdfMsg} onFile={handlePdfFile} disabled={busy} color={meta.color} />
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 }}>
+              {[
+                { id: "verbatim", label: "🔊 Read it word-for-word" },
+                { id: "script",   label: "✍ Turn it into a script first" },
+              ].map(m => (
+                <button key={m.id} onClick={() => setPdfMode(m.id)} style={{
+                  background: pdfMode === m.id ? `${meta.color}20` : "transparent",
+                  border: `1px solid ${pdfMode === m.id ? meta.color : "#333"}`,
+                  borderRadius: 7, padding: "6px 12px",
+                  color: pdfMode === m.id ? meta.color : "#777",
+                  fontSize: 13, fontFamily: BRAND.monoFont,
+                  cursor: "pointer", transition: "all 0.15s",
+                }}>
+                  {m.label}
+                </button>
+              ))}
+            </div>
+            {pdfVerbatim && <PdfAudioEstimate pdfDoc={pdfDoc} voiceEngine={voiceEngine} elBalance={elBalance} />}
+          </div>
+        )}
+
         {/* Format cards */}
+        {!pdfVerbatim && <>
         <div style={{
           display: "grid",
           gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))",
@@ -1308,9 +1677,10 @@ export default function PageCast() {
             ))}
           </div>
         </div>
+        </>}
 
         {/* Voice engine + voice selection */}
-        <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} oaiBilling={oaiBilling} output={null} format={format}
+        <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} oaiBilling={oaiBilling} output={null} format={pdfVerbatim ? "tts" : format}
           openaiVoice1={openaiVoice1} setOpenaiVoice1={setOpenaiVoice1} openaiVoice2={openaiVoice2} setOpenaiVoice2={setOpenaiVoice2}
           elevenVoice1={elevenVoice1} setElevenVoice1={setElevenVoice1} elevenVoice2={elevenVoice2} setElevenVoice2={setElevenVoice2} />
 
@@ -1324,8 +1694,18 @@ export default function PageCast() {
           transition:"all 0.2s", boxShadow: busy ? "none" : `0 0 30px ${meta.glow}`,
           marginBottom:10, marginTop:16
         }}>
-          {busy ? `● ${statusMsg}` : `▶  GENERATE ${meta.tag}`}
+          {busy ? `● ${statusMsg}` : pdfVerbatim ? "▶  CREATE MP3" : `▶  GENERATE ${meta.tag}`}
         </button>
+
+        {/* finished PDF audio */}
+        {pdfVerbatim && pdfAudio && !busy && (
+          <div style={{ background:BRAND.navy, border:`1px solid ${meta.color}35`, borderRadius:12, padding:"16px 20px", marginBottom:20 }}>
+            <div style={{ fontSize:14, color:"#2a6", fontFamily:BRAND.monoFont, marginBottom:10 }}>✓ Downloaded {pdfAudio.name}</div>
+            <audio controls src={pdfAudio.url} style={{ width:"100%" }} />
+            <a href={pdfAudio.url} download={pdfAudio.name} style={{ display:"inline-block", marginTop:10, fontSize:14, color:meta.color, fontFamily:BRAND.monoFont }}>↓ Download again</a>
+            <SharePageButton pdfDoc={pdfDoc} pdfAudio={pdfAudio} color={meta.color} />
+          </div>
+        )}
 
         {/* progress bar */}
         {busy && (
@@ -1340,9 +1720,9 @@ export default function PageCast() {
         {error && (
           <div style={{ background:"#0f0808", border:"1px solid #4a1010", borderRadius:10, padding:"16px 20px", marginBottom:20, lineHeight:1.7 }}>
             <div style={{ fontSize:16, color:"#e06050", marginBottom:6 }}><strong>⚠ Error</strong> — {error}</div>
-            <div style={{ fontSize:15, color:"#bbb" }}>
+            {inputMode !== "pdf" && <div style={{ fontSize:15, color:"#bbb" }}>
               This usually means the page requires a login, is behind a paywall, or is a JavaScript single-page app. Try a direct article URL rather than a homepage.
-            </div>
+            </div>}
           </div>
         )}
       </div>

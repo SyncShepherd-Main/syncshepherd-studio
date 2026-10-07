@@ -7,14 +7,24 @@
      POST /generate                  — Proxy to Anthropic Messages API
      POST /tts                       — Proxy to ElevenLabs TTS API
      POST /tts-openai                — Proxy to OpenAI TTS API
+     POST /share                     — Store PDF + MP3 in R2, return a public share link
+     GET  /s/<id>[/audio.mp3|/source.pdf] — Public listen + read-along page and its files
 
    Secrets (set via `wrangler secret put`):
      ANTHROPIC_API_KEY
      ELEVENLABS_API_KEY
      OPENAI_API_KEY
+
+   Bindings:
+     SHARES — R2 bucket for share pages
 ───────────────────────────────────────────────────────────────────────────── */
 
+import { renderSharePage, renderNotFoundPage } from "./sharePage.js";
+
 const MAX_TEXT_LENGTH = 15000;
+const SHARE_MAX_PDF_BYTES = 50 * 1024 * 1024;
+const SHARE_MAX_AUDIO_BYTES = 90 * 1024 * 1024; // Workers cap request bodies at 100 MB
+const SHARE_ALLOWED_ORIGINS = [/^https:\/\/([a-z0-9-]+\.)?pagecast-a6g\.pages\.dev$/, /^http:\/\/localhost:\d+$/];
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -45,6 +55,17 @@ export default {
     // Route: POST /tts-openai — OpenAI TTS proxy
     if (request.method === "POST" && path === "/tts-openai") {
       return handleTTSOpenAI(request, env);
+    }
+
+    // Route: POST /share — create a public listen + read-along page
+    if (request.method === "POST" && path === "/share") {
+      return handleShareCreate(request, env, url);
+    }
+
+    // Route: GET /s/<id>[/audio.mp3|/source.pdf] — public share page + files
+    const shareMatch = path.match(/^\/s\/([a-f0-9]{32})(?:\/(audio\.mp3|source\.pdf))?$/);
+    if (request.method === "GET" && shareMatch) {
+      return handleShareGet(request, env, shareMatch[1], shareMatch[2]);
     }
 
     // Route: GET /subscription — ElevenLabs subscription/usage info
@@ -370,6 +391,122 @@ async function handleFetch(url) {
   } catch (err) {
     return jsonResponse({ error: `Fetch failed: ${err.message}` }, 400);
   }
+}
+
+/* ─── /share — Public listen + read-along pages (R2) ──────────────────────── */
+
+async function handleShareCreate(request, env, url) {
+  if (!env.SHARES) {
+    return jsonResponse({ error: "Share storage (R2) not configured on worker" }, 500);
+  }
+  const origin = request.headers.get("Origin") || "";
+  if (!SHARE_ALLOWED_ORIGINS.some(re => re.test(origin))) {
+    return jsonResponse({ error: "Share pages can only be created from PageCast" }, 403);
+  }
+
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return jsonResponse({ error: "Invalid upload (the audio may be over 90 MB)" }, 400);
+  }
+
+  const pdf = form.get("pdf");
+  const audio = form.get("audio");
+  if (!(pdf instanceof File) || !(audio instanceof File)) {
+    return jsonResponse({ error: "Missing pdf or audio file" }, 400);
+  }
+  if (pdf.size > SHARE_MAX_PDF_BYTES) return jsonResponse({ error: "PDF is over 50 MB" }, 413);
+  if (audio.size > SHARE_MAX_AUDIO_BYTES) return jsonResponse({ error: "Audio is over 90 MB" }, 413);
+
+  const pdfBytes = await pdf.arrayBuffer();
+  if (new TextDecoder().decode(pdfBytes.slice(0, 5)) !== "%PDF-") {
+    return jsonResponse({ error: "That file isn't a PDF" }, 400);
+  }
+
+  let meta;
+  try {
+    meta = JSON.parse(form.get("meta") || "{}");
+  } catch {
+    return jsonResponse({ error: "Invalid meta JSON" }, 400);
+  }
+  const segments = Array.isArray(meta.segments) ? meta.segments.slice(0, 50000).map(s => ({
+    t: Number(s.t) || 0,
+    page: Math.max(1, parseInt(s.page, 10) || 1),
+    text: String(s.text || "").slice(0, 5000),
+  })) : [];
+
+  const id = crypto.randomUUID().replace(/-/g, "");
+  const stored = {
+    title: String(meta.title || pdf.name.replace(/\.pdf$/i, "")).slice(0, 200),
+    voice: String(meta.voice || "").slice(0, 40),
+    pdfName: String(pdf.name).slice(0, 200),
+    createdAt: new Date().toISOString(),
+    segments,
+  };
+
+  await Promise.all([
+    env.SHARES.put(`shares/${id}/source.pdf`, pdfBytes, { httpMetadata: { contentType: "application/pdf" } }),
+    env.SHARES.put(`shares/${id}/audio.mp3`, await audio.arrayBuffer(), { httpMetadata: { contentType: "audio/mpeg" } }),
+    env.SHARES.put(`shares/${id}/meta.json`, JSON.stringify(stored), { httpMetadata: { contentType: "application/json" } }),
+  ]);
+
+  return jsonResponse({ id, url: `${url.origin}/s/${id}` }, 200);
+}
+
+async function handleShareGet(request, env, id, file) {
+  const pageHeaders = {
+    "X-Robots-Tag": "noindex, nofollow",
+    "Referrer-Policy": "no-referrer",
+  };
+  if (!env.SHARES) {
+    return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
+  }
+
+  if (!file) {
+    const obj = await env.SHARES.get(`shares/${id}/meta.json`);
+    if (!obj) {
+      return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
+    }
+    const meta = await obj.json();
+    return new Response(renderSharePage(id, meta), {
+      status: 200,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "public, max-age=300",
+        "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; media-src 'self'; base-uri 'none'; form-action 'none'",
+        ...pageHeaders,
+      },
+    });
+  }
+
+  // Audio / PDF — Range support so the player can seek
+  const rangeHeader = request.headers.get("Range");
+  let obj;
+  try {
+    obj = await env.SHARES.get(`shares/${id}/${file}`, rangeHeader ? { range: request.headers } : {});
+  } catch {
+    return new Response("Range Not Satisfiable", { status: 416, headers: pageHeaders });
+  }
+  if (!obj) return new Response("Not found", { status: 404, headers: pageHeaders });
+
+  const headers = new Headers(pageHeaders);
+  obj.writeHttpMetadata(headers);
+  headers.set("ETag", obj.httpEtag);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "public, max-age=86400");
+  if (file === "source.pdf") headers.set("Content-Disposition", "inline");
+
+  if (rangeHeader && obj.range) {
+    const size = obj.size;
+    const offset = "suffix" in obj.range ? size - obj.range.suffix : (obj.range.offset || 0);
+    const length = "suffix" in obj.range ? obj.range.suffix : (obj.range.length ?? size - offset);
+    headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${size}`);
+    headers.set("Content-Length", String(length));
+    return new Response(obj.body, { status: 206, headers });
+  }
+  headers.set("Content-Length", String(obj.size));
+  return new Response(obj.body, { status: 200, headers });
 }
 
 /* ─── HTML helpers ─────────────────────────────────────────────────────────── */
