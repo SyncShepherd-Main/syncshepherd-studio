@@ -221,10 +221,12 @@ async function handleTTSOpenAI(request, env) {
     return jsonResponse({ error: "Invalid JSON body" }, 400);
   }
 
-  const { text, voice, model } = body;
+  const { text, voice, model, instructions } = body;
   if (!text) {
     return jsonResponse({ error: "Missing text" }, 400);
   }
+  // gpt-4o-mini-tts takes tone/style instructions (the app's "vibe"); tts-1 doesn't
+  const ttsModel = ["tts-1", "tts-1-hd", "gpt-4o-mini-tts"].includes(model) ? model : "tts-1";
 
   try {
     const res = await fetch("https://api.openai.com/v1/audio/speech", {
@@ -234,9 +236,10 @@ async function handleTTSOpenAI(request, env) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: model || "tts-1",
+        model: ttsModel,
         input: text,
         voice: voice || "onyx",
+        ...(ttsModel === "gpt-4o-mini-tts" && instructions ? { instructions: String(instructions).slice(0, 1000) } : {}),
       }),
     });
 
