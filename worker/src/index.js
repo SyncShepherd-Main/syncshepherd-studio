@@ -7,18 +7,31 @@
      POST /generate                  — Proxy to Anthropic Messages API
      POST /tts                       — Proxy to ElevenLabs TTS API
      POST /tts-openai                — Proxy to OpenAI TTS API
+     POST /share                     — Start a share page (read-along timings) → { id }
+     POST /share/<id>/<file>/start|complete, PUT …/part — Multipart upload of PDF / MP3 to R2
+     POST /share/<id>/finish         — Verify uploads, publish → { url }
+     GET  /s/<id>[/audio.mp3|/source.pdf] — Public listen + read-along page and its files
 
    Secrets (set via `wrangler secret put`):
      ANTHROPIC_API_KEY
      ELEVENLABS_API_KEY
      OPENAI_API_KEY
+
+   Bindings:
+     SHARES — R2 bucket for share pages
 ───────────────────────────────────────────────────────────────────────────── */
 
+import { renderSharePage, renderNotFoundPage } from "./sharePage.js";
+
 const MAX_TEXT_LENGTH = 15000;
+const SHARE_PART_MAX_BYTES = 20 * 1024 * 1024;  // client sends 10 MB parts
+const SHARE_MAX_PARTS = { "source.pdf": 10, "audio.mp3": 100 }; // up to ~1 GB of audio
+const SHARE_UPLOAD_WINDOW_MS = 3 * 60 * 60 * 1000; // uploads must finish within 3 hours
+const SHARE_ALLOWED_ORIGINS = [/^https:\/\/([a-z0-9-]+\.)?pagecast-a6g\.pages\.dev$/, /^http:\/\/localhost:\d+$/];
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
@@ -45,6 +58,21 @@ export default {
     // Route: POST /tts-openai — OpenAI TTS proxy
     if (request.method === "POST" && path === "/tts-openai") {
       return handleTTSOpenAI(request, env);
+    }
+
+    // Route: POST /share … — create a public listen + read-along page
+    if (request.method === "POST" && path === "/share") {
+      return handleShareCreate(request, env);
+    }
+    const uploadMatch = path.match(/^\/share\/([a-f0-9]{32})(?:\/(audio\.mp3|source\.pdf)\/(start|part|complete)|\/(finish))$/);
+    if (uploadMatch && (request.method === "POST" || request.method === "PUT")) {
+      return handleShareUpload(request, env, url, uploadMatch[1], uploadMatch[2], uploadMatch[3] || uploadMatch[4]);
+    }
+
+    // Route: GET /s/<id>[/audio.mp3|/source.pdf] — public share page + files
+    const shareMatch = path.match(/^\/s\/([a-f0-9]{32})(?:\/(audio\.mp3|source\.pdf))?$/);
+    if ((request.method === "GET" || request.method === "HEAD") && shareMatch) {
+      return handleShareGet(request, env, shareMatch[1], shareMatch[2]);
     }
 
     // Route: GET /subscription — ElevenLabs subscription/usage info
@@ -370,6 +398,166 @@ async function handleFetch(url) {
   } catch (err) {
     return jsonResponse({ error: `Fetch failed: ${err.message}` }, 400);
   }
+}
+
+/* ─── /share — Public listen + read-along pages (R2) ──────────────────────── */
+
+function shareOriginAllowed(request) {
+  const origin = request.headers.get("Origin") || "";
+  return SHARE_ALLOWED_ORIGINS.some(re => re.test(origin));
+}
+
+async function handleShareCreate(request, env) {
+  if (!env.SHARES) {
+    return jsonResponse({ error: "Share storage (R2) not configured on worker" }, 500);
+  }
+  if (!shareOriginAllowed(request)) {
+    return jsonResponse({ error: "Share pages can only be created from PageCast" }, 403);
+  }
+
+  let meta;
+  try {
+    meta = await request.json();
+  } catch {
+    return jsonResponse({ error: "Invalid JSON body" }, 400);
+  }
+  const segments = Array.isArray(meta.segments) ? meta.segments.slice(0, 100000).map(s => ({
+    t: Number(s.t) || 0,
+    page: Math.max(1, parseInt(s.page, 10) || 1),
+    text: String(s.text || "").slice(0, 5000),
+  })) : [];
+
+  const id = crypto.randomUUID().replace(/-/g, "");
+  const pdfName = String(meta.pdfName || "document.pdf").slice(0, 200);
+  const stored = {
+    title: String(meta.title || pdfName.replace(/\.pdf$/i, "")).slice(0, 200),
+    voice: String(meta.voice || "").slice(0, 40),
+    pdfName,
+    createdAt: new Date().toISOString(),
+    ready: false,
+    segments,
+  };
+  await env.SHARES.put(`shares/${id}/meta.json`, JSON.stringify(stored), { httpMetadata: { contentType: "application/json" } });
+  return jsonResponse({ id }, 200);
+}
+
+async function handleShareUpload(request, env, url, id, file, action) {
+  if (!env.SHARES) {
+    return jsonResponse({ error: "Share storage (R2) not configured on worker" }, 500);
+  }
+  if (!shareOriginAllowed(request)) {
+    return jsonResponse({ error: "Share pages can only be created from PageCast" }, 403);
+  }
+
+  // Only shares that exist, aren't published yet, and are recent can take uploads
+  const metaObj = await env.SHARES.get(`shares/${id}/meta.json`);
+  if (!metaObj) return jsonResponse({ error: "Share not found" }, 404);
+  const meta = await metaObj.json();
+  if (meta.ready) return jsonResponse({ error: "Share already published" }, 409);
+  if (Date.now() - Date.parse(meta.createdAt) > SHARE_UPLOAD_WINDOW_MS) {
+    return jsonResponse({ error: "Upload window expired — create the share page again" }, 410);
+  }
+
+  const key = file && `shares/${id}/${file}`;
+  try {
+    if (action === "start" && request.method === "POST") {
+      const contentType = file === "audio.mp3" ? "audio/mpeg" : "application/pdf";
+      const mpu = await env.SHARES.createMultipartUpload(key, { httpMetadata: { contentType } });
+      return jsonResponse({ uploadId: mpu.uploadId }, 200);
+    }
+
+    if (action === "part" && request.method === "PUT") {
+      const uploadId = url.searchParams.get("uploadId");
+      const n = parseInt(url.searchParams.get("n"), 10);
+      const size = parseInt(request.headers.get("Content-Length") || "0", 10);
+      if (!uploadId || !(n >= 1 && n <= SHARE_MAX_PARTS[file])) return jsonResponse({ error: "Bad part number" }, 400);
+      if (!size || size > SHARE_PART_MAX_BYTES) return jsonResponse({ error: "Bad part size" }, 413);
+      const part = await env.SHARES.resumeMultipartUpload(key, uploadId).uploadPart(n, request.body);
+      return jsonResponse(part, 200); // { partNumber, etag }
+    }
+
+    if (action === "complete" && request.method === "POST") {
+      const { uploadId, parts } = await request.json();
+      if (!uploadId || !Array.isArray(parts) || !parts.length) return jsonResponse({ error: "Missing parts" }, 400);
+      const sorted = parts.map(p => ({ partNumber: p.partNumber, etag: p.etag })).sort((a, b) => a.partNumber - b.partNumber);
+      await env.SHARES.resumeMultipartUpload(key, uploadId).complete(sorted);
+      return jsonResponse({ ok: true }, 200);
+    }
+
+    if (action === "finish" && request.method === "POST") {
+      const pdfHead = await env.SHARES.get(`shares/${id}/source.pdf`, { range: { offset: 0, length: 5 } });
+      const audioHead = await env.SHARES.head(`shares/${id}/audio.mp3`);
+      if (!pdfHead || !audioHead) return jsonResponse({ error: "Upload incomplete" }, 400);
+      if (await pdfHead.text() !== "%PDF-") {
+        await env.SHARES.delete([`shares/${id}/source.pdf`, `shares/${id}/audio.mp3`, `shares/${id}/meta.json`]);
+        return jsonResponse({ error: "That file isn't a PDF" }, 400);
+      }
+      meta.ready = true;
+      await env.SHARES.put(`shares/${id}/meta.json`, JSON.stringify(meta), { httpMetadata: { contentType: "application/json" } });
+      return jsonResponse({ id, url: `${url.origin}/s/${id}` }, 200);
+    }
+  } catch (err) {
+    return jsonResponse({ error: `Upload error: ${err.message}` }, 500);
+  }
+  return jsonResponse({ error: "Not found" }, 404);
+}
+
+async function handleShareGet(request, env, id, file) {
+  const pageHeaders = {
+    "X-Robots-Tag": "noindex, nofollow",
+    "Referrer-Policy": "no-referrer",
+  };
+  if (!env.SHARES) {
+    return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
+  }
+
+  if (!file) {
+    const obj = await env.SHARES.get(`shares/${id}/meta.json`);
+    if (!obj) {
+      return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
+    }
+    const meta = await obj.json();
+    if (!meta.ready) {
+      return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
+    }
+    return new Response(renderSharePage(id, meta), {
+      status: 200,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "public, max-age=300",
+        "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; media-src 'self'; base-uri 'none'; form-action 'none'",
+        ...pageHeaders,
+      },
+    });
+  }
+
+  // Audio / PDF — Range support so the player can seek
+  const rangeHeader = request.headers.get("Range");
+  let obj;
+  try {
+    obj = await env.SHARES.get(`shares/${id}/${file}`, rangeHeader ? { range: request.headers } : {});
+  } catch {
+    return new Response("Range Not Satisfiable", { status: 416, headers: pageHeaders });
+  }
+  if (!obj) return new Response("Not found", { status: 404, headers: pageHeaders });
+
+  const headers = new Headers(pageHeaders);
+  obj.writeHttpMetadata(headers);
+  headers.set("ETag", obj.httpEtag);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "public, max-age=86400");
+  if (file === "source.pdf") headers.set("Content-Disposition", "inline");
+
+  if (rangeHeader && obj.range) {
+    const size = obj.size;
+    const offset = "suffix" in obj.range ? size - obj.range.suffix : (obj.range.offset || 0);
+    const length = "suffix" in obj.range ? obj.range.suffix : (obj.range.length ?? size - offset);
+    headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${size}`);
+    headers.set("Content-Length", String(length));
+    return new Response(obj.body, { status: 206, headers });
+  }
+  headers.set("Content-Length", String(obj.size));
+  return new Response(obj.body, { status: 200, headers });
 }
 
 /* ─── HTML helpers ─────────────────────────────────────────────────────────── */
