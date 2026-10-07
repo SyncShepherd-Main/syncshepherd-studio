@@ -11,28 +11,33 @@
      POST /share/<id>/<file>/start|complete, PUT …/part — Multipart upload of PDF / MP3 to R2
      POST /share/<id>/finish         — Verify uploads, publish → { url }
      GET  /s/<id>[/audio.mp3|/source.pdf] — Public listen + read-along page and its files
+     POST /s/<id>/unlock             — Password form for protected share pages (sets a cookie)
+
+   Every route except /s/… requires the X-PageCast-Key header. The app reaches the
+   Worker through its Pages Function (/api/*, behind Zero Trust), which adds it.
 
    Secrets (set via `wrangler secret put`):
      ANTHROPIC_API_KEY
      ELEVENLABS_API_KEY
      OPENAI_API_KEY
+     PAGECAST_KEY      — shared with the Pages Function (WORKER_KEY there)
 
    Bindings:
      SHARES — R2 bucket for share pages
 ───────────────────────────────────────────────────────────────────────────── */
 
-import { renderSharePage, renderNotFoundPage } from "./sharePage.js";
+import { renderSharePage, renderNotFoundPage, renderLockPage } from "./sharePage.js";
 
 const MAX_TEXT_LENGTH = 15000;
 const SHARE_PART_MAX_BYTES = 20 * 1024 * 1024;  // client sends 10 MB parts
 const SHARE_MAX_PARTS = { "source.pdf": 10, "audio.mp3": 100 }; // up to ~1 GB of audio
 const SHARE_UPLOAD_WINDOW_MS = 3 * 60 * 60 * 1000; // uploads must finish within 3 hours
-const SHARE_ALLOWED_ORIGINS = [/^https:\/\/([a-z0-9-]+\.)?pagecast-a6g\.pages\.dev$/, /^http:\/\/localhost:\d+$/];
+const SHARE_PW_ITERATIONS = 10000;
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, X-PageCast-Key",
 };
 
 export default {
@@ -44,6 +49,23 @@ export default {
 
     const url = new URL(request.url);
     const path = url.pathname;
+
+    // Public: GET /s/<id>[/audio.mp3|/source.pdf] — share page + files
+    const shareMatch = path.match(/^\/s\/([a-f0-9]{32})(?:\/(audio\.mp3|source\.pdf))?$/);
+    if ((request.method === "GET" || request.method === "HEAD") && shareMatch) {
+      return handleShareGet(request, env, shareMatch[1], shareMatch[2]);
+    }
+
+    // Public: POST /s/<id>/unlock — password form for a protected share page
+    const unlockMatch = path.match(/^\/s\/([a-f0-9]{32})\/unlock$/);
+    if (request.method === "POST" && unlockMatch) {
+      return handleShareUnlock(request, env, unlockMatch[1]);
+    }
+
+    // Everything else is PageCast-only (fails closed if the key isn't configured)
+    if (!env.PAGECAST_KEY || !timingSafeEqual(request.headers.get("X-PageCast-Key") || "", env.PAGECAST_KEY)) {
+      return jsonResponse({ error: "Unauthorized" }, 401);
+    }
 
     // Route: POST /generate — Anthropic API proxy
     if (request.method === "POST" && path === "/generate") {
@@ -67,12 +89,6 @@ export default {
     const uploadMatch = path.match(/^\/share\/([a-f0-9]{32})(?:\/(audio\.mp3|source\.pdf)\/(start|part|complete)|\/(finish))$/);
     if (uploadMatch && (request.method === "POST" || request.method === "PUT")) {
       return handleShareUpload(request, env, url, uploadMatch[1], uploadMatch[2], uploadMatch[3] || uploadMatch[4]);
-    }
-
-    // Route: GET /s/<id>[/audio.mp3|/source.pdf] — public share page + files
-    const shareMatch = path.match(/^\/s\/([a-f0-9]{32})(?:\/(audio\.mp3|source\.pdf))?$/);
-    if ((request.method === "GET" || request.method === "HEAD") && shareMatch) {
-      return handleShareGet(request, env, shareMatch[1], shareMatch[2]);
     }
 
     // Route: GET /subscription — ElevenLabs subscription/usage info
@@ -402,17 +418,9 @@ async function handleFetch(url) {
 
 /* ─── /share — Public listen + read-along pages (R2) ──────────────────────── */
 
-function shareOriginAllowed(request) {
-  const origin = request.headers.get("Origin") || "";
-  return SHARE_ALLOWED_ORIGINS.some(re => re.test(origin));
-}
-
 async function handleShareCreate(request, env) {
   if (!env.SHARES) {
     return jsonResponse({ error: "Share storage (R2) not configured on worker" }, 500);
-  }
-  if (!shareOriginAllowed(request)) {
-    return jsonResponse({ error: "Share pages can only be created from PageCast" }, 403);
   }
 
   let meta;
@@ -437,6 +445,13 @@ async function handleShareCreate(request, env) {
     ready: false,
     segments,
   };
+  // Optional password: store only a salted PBKDF2 hash, plus a random cookie token
+  const password = String(meta.password || "").slice(0, 200);
+  if (password) {
+    stored.pwSalt = randomHex(16);
+    stored.pwHash = await hashPassword(password, stored.pwSalt);
+    stored.unlockToken = randomHex(32);
+  }
   await env.SHARES.put(`shares/${id}/meta.json`, JSON.stringify(stored), { httpMetadata: { contentType: "application/json" } });
   return jsonResponse({ id }, 200);
 }
@@ -444,9 +459,6 @@ async function handleShareCreate(request, env) {
 async function handleShareUpload(request, env, url, id, file, action) {
   if (!env.SHARES) {
     return jsonResponse({ error: "Share storage (R2) not configured on worker" }, 500);
-  }
-  if (!shareOriginAllowed(request)) {
-    return jsonResponse({ error: "Share pages can only be created from PageCast" }, 403);
   }
 
   // Only shares that exist, aren't published yet, and are recent can take uploads
@@ -511,20 +523,29 @@ async function handleShareGet(request, env, id, file) {
     return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
   }
 
+  const metaObj = await env.SHARES.get(`shares/${id}/meta.json`);
+  const meta = metaObj ? await metaObj.json() : null;
+  if (!meta || !meta.ready) {
+    return file
+      ? new Response("Not found", { status: 404, headers: pageHeaders })
+      : new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
+  }
+
+  // Password-protected: needs this share's unlock cookie
+  const locked = meta.pwHash && !timingSafeEqual(getCookie(request, `pc_${id}`) || "", meta.unlockToken);
+  if (locked) {
+    return file
+      ? new Response("Password required", { status: 401, headers: pageHeaders })
+      : lockPageResponse(id, "", 200);
+  }
+  const cacheControl = meta.pwHash ? "private, no-store" : "public, max-age=300";
+
   if (!file) {
-    const obj = await env.SHARES.get(`shares/${id}/meta.json`);
-    if (!obj) {
-      return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
-    }
-    const meta = await obj.json();
-    if (!meta.ready) {
-      return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", ...pageHeaders } });
-    }
     return new Response(renderSharePage(id, meta), {
       status: 200,
       headers: {
         "Content-Type": "text/html; charset=utf-8",
-        "Cache-Control": "public, max-age=300",
+        "Cache-Control": cacheControl,
         "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; media-src 'self'; base-uri 'none'; form-action 'none'",
         ...pageHeaders,
       },
@@ -545,7 +566,7 @@ async function handleShareGet(request, env, id, file) {
   obj.writeHttpMetadata(headers);
   headers.set("ETag", obj.httpEtag);
   headers.set("Accept-Ranges", "bytes");
-  headers.set("Cache-Control", "public, max-age=86400");
+  headers.set("Cache-Control", meta.pwHash ? "private, max-age=86400" : "public, max-age=86400");
   if (file === "source.pdf") headers.set("Content-Disposition", "inline");
 
   if (rangeHeader && obj.range) {
@@ -558,6 +579,72 @@ async function handleShareGet(request, env, id, file) {
   }
   headers.set("Content-Length", String(obj.size));
   return new Response(obj.body, { status: 200, headers });
+}
+
+async function handleShareUnlock(request, env, id) {
+  const metaObj = env.SHARES && await env.SHARES.get(`shares/${id}/meta.json`);
+  const meta = metaObj ? await metaObj.json() : null;
+  if (!meta || !meta.ready) {
+    return new Response(renderNotFoundPage(), { status: 404, headers: { "Content-Type": "text/html; charset=utf-8", "X-Robots-Tag": "noindex, nofollow" } });
+  }
+  if (!meta.pwHash) return Response.redirect(new URL(`/s/${id}`, request.url).toString(), 303);
+
+  let password = "";
+  try {
+    password = String((await request.formData()).get("password") || "").slice(0, 200);
+  } catch { /* empty form */ }
+
+  if (!password || !timingSafeEqual(await hashPassword(password, meta.pwSalt), meta.pwHash)) {
+    await new Promise(r => setTimeout(r, 1000)); // slow down guessing
+    return lockPageResponse(id, "That password didn't work. Try again.", 401);
+  }
+
+  return new Response(null, {
+    status: 303,
+    headers: {
+      "Location": `/s/${id}`,
+      "Set-Cookie": `pc_${id}=${meta.unlockToken}; Path=/s/${id}; Max-Age=31536000; HttpOnly; Secure; SameSite=Lax`,
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+function lockPageResponse(id, error, status) {
+  return new Response(renderLockPage(id, error), {
+    status,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Robots-Tag": "noindex, nofollow",
+      "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; form-action 'self'; base-uri 'none'",
+    },
+  });
+}
+
+/* ─── Crypto / cookie helpers ──────────────────────────────────────────────── */
+
+function randomHex(bytes) {
+  return [...crypto.getRandomValues(new Uint8Array(bytes))].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function hashPassword(password, saltHex) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
+  const salt = new Uint8Array(saltHex.match(/../g).map(h => parseInt(h, 16)));
+  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations: SHARE_PW_ITERATIONS }, key, 256);
+  return [...new Uint8Array(bits)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function timingSafeEqual(a, b) {
+  if (typeof a !== "string" || typeof b !== "string" || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+function getCookie(request, name) {
+  const match = (request.headers.get("Cookie") || "").match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+  return match ? match[1] : null;
 }
 
 /* ─── HTML helpers ─────────────────────────────────────────────────────────── */
