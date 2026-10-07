@@ -1339,7 +1339,75 @@ const ENGINES = [
   { id: "browser",    label: "Browser Voice (Free)", color: "#888",  icon: "🖥" },
 ];
 
-function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBilling, output, format,
+/* ─── Voice Preview ──────────────────────────────────────────────────────── */
+
+const PREVIEW_CHARS = 280; // ~15 seconds of speech, under $0.01
+
+/** Opening sentences of the source (up to ~280 chars), or a stock line */
+function previewText(sampleText, label) {
+  const text = (sampleText || "").replace(/\s+/g, " ").trim();
+  if (text.length < 40) return `Hi, I'm ${label}. This is how I'll sound reading your document out loud, from start to finish.`;
+  if (text.length <= PREVIEW_CHARS) return text;
+  const cut = text.slice(0, PREVIEW_CHARS);
+  const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("! "), cut.lastIndexOf("? "));
+  return end > 80 ? cut.slice(0, end + 1) : cut.slice(0, cut.lastIndexOf(" ")) + "...";
+}
+
+function VoicePreviewButton({ engine, voice, sampleText }) {
+  const [state, setState] = useState("idle"); // idle | loading | playing | error
+  const [err, setErr] = useState("");
+  const audioRef = useRef(null);
+  const cacheRef = useRef({}); // "engine|voice|text" → blob URL, so replays are free
+
+  const stop = () => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    setState("idle");
+  };
+
+  // Stop when the voice changes or the picker unmounts
+  useEffect(() => stop, [engine, voice]);
+  useEffect(() => () => Object.values(cacheRef.current).forEach(u => URL.revokeObjectURL(u)), []);
+
+  const play = async () => {
+    if (state === "playing" || state === "loading") { stop(); return; }
+    const label = engine === "openai" ? OPENAI_VOICES[voice].label : ELEVENLABS_VOICES[voice].label;
+    const text = previewText(sampleText, label);
+    const key = `${engine}|${voice}|${text}`;
+    setErr("");
+    try {
+      if (!cacheRef.current[key]) {
+        setState("loading");
+        const buf = engine === "openai"
+          ? await fetchOpenAITTSClip(text, voice)
+          : await fetchTTSClip(text, ELEVENLABS_VOICES[voice].id);
+        cacheRef.current[key] = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+      }
+      const audio = new Audio(cacheRef.current[key]);
+      audio.onended = () => setState("idle");
+      audioRef.current = audio;
+      await audio.play();
+      setState("playing");
+    } catch (e) {
+      setErr(e.message); setState("error");
+    }
+  };
+
+  const color = engine === "openai" ? "#10a37f" : "#f0a030";
+  return (
+    <>
+      <button onClick={play} title="Hear a ~15 second sample (under $0.01)" style={{
+        background: state === "playing" ? `${color}20` : "transparent",
+        border: `1px solid ${color}`, borderRadius: 6, padding: "4px 10px",
+        color, fontSize: 13, fontFamily: BRAND.monoFont, cursor: state === "loading" ? "wait" : "pointer",
+      }}>
+        {state === "loading" ? "Loading..." : state === "playing" ? "⏹ Stop" : "▶ Preview"}
+      </button>
+      {state === "error" && <span style={{ fontSize: 12, color: "#e06050", fontFamily: BRAND.monoFont }}>{err}</span>}
+    </>
+  );
+}
+
+function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBilling, output, format, sampleText,
   openaiVoice1, setOpenaiVoice1, openaiVoice2, setOpenaiVoice2,
   elevenVoice1, setElevenVoice1, elevenVoice2, setElevenVoice2 }) {
 
@@ -1403,6 +1471,7 @@ function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBi
               ))}
             </select>
           )}
+          <VoicePreviewButton engine={engine} voice={engine === "openai" ? openaiVoice1 : elevenVoice1} sampleText={sampleText} />
 
           {isPodcast && (
             <>
@@ -1421,6 +1490,7 @@ function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBi
                   ))}
                 </select>
               )}
+              <VoicePreviewButton engine={engine} voice={engine === "openai" ? openaiVoice2 : elevenVoice2} sampleText={sampleText} />
             </>
           )}
         </div>
@@ -1790,6 +1860,7 @@ export default function PageCast() {
 
         {/* Voice engine + voice selection */}
         <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} oaiBilling={oaiBilling} output={null} format={pdfVerbatim ? "tts" : format}
+          sampleText={inputMode === "pdf" && pdfDoc ? pdfDoc.text.slice(0, 2000) : ""}
           openaiVoice1={openaiVoice1} setOpenaiVoice1={setOpenaiVoice1} openaiVoice2={openaiVoice2} setOpenaiVoice2={setOpenaiVoice2}
           elevenVoice1={elevenVoice1} setElevenVoice1={setElevenVoice1} elevenVoice2={elevenVoice2} setElevenVoice2={setElevenVoice2} />
 
@@ -1859,6 +1930,7 @@ export default function PageCast() {
             </div>
             {/* Voice engine selector */}
             <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} oaiBilling={oaiBilling} output={output} format={format}
+              sampleText={cleanScriptForTTS(output, format).slice(0, 2000)}
               openaiVoice1={openaiVoice1} setOpenaiVoice1={setOpenaiVoice1} openaiVoice2={openaiVoice2} setOpenaiVoice2={setOpenaiVoice2}
               elevenVoice1={elevenVoice1} setElevenVoice1={setElevenVoice1} elevenVoice2={elevenVoice2} setElevenVoice2={setElevenVoice2} />
           </div>
