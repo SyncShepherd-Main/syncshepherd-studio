@@ -26,7 +26,7 @@
      SHARES — R2 bucket for share pages
 ───────────────────────────────────────────────────────────────────────────── */
 
-import { renderSharePage, renderNotFoundPage, renderLockPage } from "./sharePage.js";
+import { renderSharePage, renderNotFoundPage, renderLockPage, SHARE_PAGE_CSP } from "./sharePage.js";
 
 const MAX_TEXT_LENGTH = 15000;
 const SHARE_PART_MAX_BYTES = 20 * 1024 * 1024;  // client sends 10 MB parts
@@ -434,6 +434,12 @@ async function handleShareCreate(request, env) {
     page: Math.max(1, parseInt(s.page, 10) || 1),
     text: String(s.text || "").slice(0, 5000),
   })) : [];
+  const chapters = Array.isArray(meta.chapters) ? meta.chapters.slice(0, 1000).map(c => ({
+    title: String(c.title || "").slice(0, 200),
+    page: Math.max(1, parseInt(c.page, 10) || 1),
+    level: Math.min(3, Math.max(1, parseInt(c.level, 10) || 1)),
+    t: Math.max(0, Number(c.t) || 0),
+  })).filter(c => c.title).sort((a, b) => a.t - b.t) : [];
 
   const id = crypto.randomUUID().replace(/-/g, "");
   const pdfName = String(meta.pdfName || "document.pdf").slice(0, 200);
@@ -444,6 +450,7 @@ async function handleShareCreate(request, env) {
     createdAt: new Date().toISOString(),
     ready: false,
     segments,
+    chapters,
   };
   // Optional password: store only a salted PBKDF2 hash, plus a random cookie token
   const password = String(meta.password || "").slice(0, 200);
@@ -546,7 +553,7 @@ async function handleShareGet(request, env, id, file) {
       headers: {
         "Content-Type": "text/html; charset=utf-8",
         "Cache-Control": cacheControl,
-        "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; media-src 'self'; base-uri 'none'; form-action 'none'",
+        "Content-Security-Policy": SHARE_PAGE_CSP,
         ...pageHeaders,
       },
     });

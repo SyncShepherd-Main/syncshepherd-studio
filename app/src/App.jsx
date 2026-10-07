@@ -424,13 +424,25 @@ async function extractPdfText(file, onProgress) {
   pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
   const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
-  const pageLines = []; // [{ page, lines: [] }]
+  const pageLines = []; // [{ page, lines: [], heights: [] }] — heights = font size per line
   for (let i = 1; i <= pdf.numPages; i++) {
     if (onProgress) onProgress(`Reading page ${i} of ${pdf.numPages}...`);
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
-    const raw = content.items.map(it => (it.str || "") + (it.hasEOL ? "\n" : "")).join("");
-    pageLines.push({ page: i, lines: raw.split("\n").map(l => l.replace(/\s+/g, " ").trim()).filter(Boolean) });
+    const lines = [], heights = [];
+    let cur = "", h = 0;
+    const push = () => {
+      const l = cur.replace(/\s+/g, " ").trim();
+      if (l) { lines.push(l); heights.push(Math.round(h * 2) / 2); }
+      cur = ""; h = 0;
+    };
+    for (const it of content.items) {
+      cur += it.str || "";
+      if (it.str && it.str.trim()) h = Math.max(h, Math.abs(it.transform?.[3] || 0) || it.height || 0);
+      if (it.hasEOL) push();
+    }
+    push();
+    pageLines.push({ page: i, lines, heights });
   }
 
   // Running headers/footers: short lines at the top/bottom of a page that repeat (digits
@@ -467,13 +479,24 @@ async function extractPdfText(file, onProgress) {
   });
   const isPageNumber = l => /^(page\s*)?\d+(\s*(of|\/)\s*\d+)?$/i.test(l);
 
+  // Pass 1: drop headers/footers/page numbers; keep each line's font size
+  const keptByPage = pageLines.map(({ page, lines, heights }) => ({
+    page,
+    lines: lines.map((text, idx) => ({ text, h: heights[idx], idx, count: lines.length }))
+      .filter(({ text, idx, count }) => {
+        const atEdge = idx < 3 || idx >= count - 3;
+        return !isPageNumber(text) && !(atEdge && repeated.has(norm(text)));
+      }),
+  }));
+  const keptLines = keptByPage.flatMap(({ page, lines }) => lines.map(l => ({ page, text: l.text, h: l.h })));
+  const bodySize = mostUsedFontSize(keptLines);
+
+  // Pass 2: page text. Headings (larger font, no end punctuation) get a period so the
+  // narrator pauses and they become their own sentence for read-along / chapter jumps.
   const pages = []; // [{ page, text }]
-  for (const { page, lines } of pageLines) {
-    const kept = lines.filter((l, idx) => {
-      const atEdge = idx < 3 || idx >= lines.length - 3;
-      return !isPageNumber(l) && !(atEdge && repeated.has(norm(l)));
-    });
-    const text = kept.join("\n")
+  for (const { page, lines } of keptByPage) {
+    const text = lines.map(l => (bodySize && l.h >= bodySize * 1.2 && l.text.length <= 120 && !/[.!?:;,]$/.test(l.text)) ? `${l.text}.` : l.text)
+      .join("\n")
       .replace(/(\w)-\n(\w)/g, "$1$2")   // re-join words hyphenated across lines
       .replace(/\s+/g, " ")
       .trim();
@@ -484,15 +507,92 @@ async function extractPdfText(file, onProgress) {
   if (text.replace(/\s/g, "").length < 20) {
     throw new Error("No readable text found. This PDF is probably a scanned image — it needs OCR first.");
   }
+  // Chapters: the PDF's own bookmarks if it has them, else large-font headings
+  const outline = await readPdfOutline(pdf);
+  const chapters = outline.length ? outline : detectHeadings(keptLines);
+
   return {
     name: file.name,
     file,
     text,
+    chapters,
+    chapterSource: outline.length ? "bookmarks" : "headings",
     sentences: splitIntoSentences(pages),
     pages: pdf.numPages,
     words: text.split(/\s+/).filter(Boolean).length,
     chars: text.length,
   };
+}
+
+/** PDF bookmarks (outline) → [{ title, page, level }], up to 3 levels deep */
+async function readPdfOutline(pdf) {
+  const outline = await pdf.getOutline().catch(() => null);
+  if (!outline || !outline.length) return [];
+  const out = [];
+  const walk = async (items, level) => {
+    for (const it of items) {
+      let page = null;
+      try {
+        let dest = it.dest;
+        if (typeof dest === "string") dest = await pdf.getDestination(dest);
+        if (Array.isArray(dest) && dest[0] != null) {
+          page = typeof dest[0] === "number" ? dest[0] + 1 : (await pdf.getPageIndex(dest[0])) + 1;
+        }
+      } catch { /* unresolvable bookmark */ }
+      const title = (it.title || "").replace(/\s+/g, " ").trim();
+      if (page && title) out.push({ title, page, level });
+      if (level < 3 && it.items && it.items.length) await walk(it.items, level + 1);
+    }
+  };
+  await walk(outline, 1);
+  return out;
+}
+
+/**
+ * No bookmarks: treat short lines in a clearly larger font than the body text as
+ * headings. The two largest heading sizes become levels 1 and 2.
+ */
+/** The font size most text is set in (by character count) */
+function mostUsedFontSize(lines) {
+  const weight = new Map(); // font size → characters set in it
+  lines.forEach(l => weight.set(l.h, (weight.get(l.h) || 0) + l.text.length));
+  return weight.size ? [...weight].sort((a, b) => b[1] - a[1])[0][0] : 0;
+}
+
+function detectHeadings(lines) {
+  const body = mostUsedFontSize(lines);
+  if (!body) return [];
+
+  const isHeading = l => l.h >= body * 1.2 && l.text.length >= 2 && l.text.length <= 120
+    && /[a-z]/i.test(l.text) && !/\.{4,}/.test(l.text);   // skip TOC dot-leader lines
+  const candidates = [];
+  let prevWasHeading = false;
+  for (const l of lines) {
+    if (!isHeading(l)) { prevWasHeading = false; continue; }
+    const prev = candidates[candidates.length - 1];
+    // A heading wrapped onto two lines: same page, same size, back to back
+    if (prevWasHeading && prev.page === l.page && prev.h === l.h) prev.title += " " + l.text;
+    else candidates.push({ title: l.text, page: l.page, h: l.h });
+    prevWasHeading = true;
+  }
+
+  const sizes = [...new Set(candidates.map(c => c.h))].sort((a, b) => b - a);
+  const levelOf = h => sizes.indexOf(h) + 1;
+  let picked = candidates.filter(c => levelOf(c.h) <= 2);
+  if (picked.length > 300) picked = picked.filter(c => levelOf(c.h) === 1);
+  return picked.map(c => ({ title: c.title, page: c.page, level: levelOf(c.h) }));
+}
+
+/** Give each chapter the audio time of its first sentence (title match on its page, else page start) */
+function placeChapters(chapters, segments) {
+  const norm = t => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const normed = segments.map(s => norm(s.text));
+  return chapters.map(c => {
+    const key = norm(c.title).slice(0, 40);
+    let i = key ? segments.findIndex((s, j) => s.page === c.page && normed[j].includes(key)) : -1;
+    if (i < 0) i = segments.findIndex(s => s.page >= c.page);
+    return i < 0 ? null : { title: c.title, page: c.page, level: c.level, t: segments[i].t };
+  }).filter(Boolean);
 }
 
 /** Split page texts into sentences tagged with their page (each ≤ max chars) */
@@ -651,11 +751,11 @@ async function uploadShareFile(id, name, blob, onBytes) {
 }
 
 /** Upload PDF + MP3 + read-along timings; returns the public share URL */
-async function createSharePage({ pdfFile, audioBlob, title, voice, segments, password }, onProgress) {
+async function createSharePage({ pdfFile, audioBlob, title, voice, segments, chapters, password }, onProgress) {
   const { id } = await shareCall("/share", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, voice, pdfName: pdfFile.name, segments, password }),
+    body: JSON.stringify({ title, voice, pdfName: pdfFile.name, segments, chapters, password }),
   });
   const total = pdfFile.size + audioBlob.size;
   let sent = 0;
@@ -1127,6 +1227,11 @@ function PdfDropZone({ pdfDoc, pdfStatus, pdfMsg, onFile, disabled, color }) {
           <div style={{ fontSize: 14, color: "#bcc8d4", fontFamily: BRAND.monoFont }}>
             {pdfDoc.pages} page{pdfDoc.pages > 1 ? "s" : ""} · {pdfDoc.words.toLocaleString()} words · {pdfDoc.chars.toLocaleString()} characters
           </div>
+          <div style={{ fontSize: 13, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 4 }}>
+            {pdfDoc.chapters.length
+              ? <>📑 {pdfDoc.chapters.length} chapter{pdfDoc.chapters.length > 1 ? "s" : ""}/sections found ({pdfDoc.chapterSource === "bookmarks" ? "from the PDF's bookmarks" : "from its headings"})</>
+              : "📑 No chapters found — the share page will have no Contents menu"}
+          </div>
           <div style={{ fontSize: 13, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 8 }}>Drop another PDF or click to replace</div>
         </>
       ) : (
@@ -1162,6 +1267,7 @@ function SharePageButton({ pdfDoc, pdfAudio, color }) {
         title: pdfDoc.name.replace(/\.pdf$/i, ""),
         voice: pdfAudio.voice,
         segments: pdfAudio.segments,
+        chapters: pdfAudio.chapters,
         password: password.trim(),
       }, setPct);
       try { localStorage.setItem("pagecast.sharePassword", password.trim()); } catch { /* storage blocked */ }
@@ -1643,7 +1749,7 @@ export default function PageCast() {
       const { blob, segments } = await renderLongTextMp3(pdfDoc.sentences, voiceEngine, voice, setStatus);
       const name = `${pdfDoc.name.replace(/\.pdf$/i, "")}-${voice}.mp3`;
       downloadBlob(blob, name);
-      setPdfAudio({ url: URL.createObjectURL(blob), name, blob, segments, voice });
+      setPdfAudio({ url: URL.createObjectURL(blob), name, blob, segments, voice, chapters: placeChapters(pdfDoc.chapters, segments) });
       setPhase("idle");
       if (voiceEngine === "elevenlabs") refreshBalance();
     } catch (e) {
