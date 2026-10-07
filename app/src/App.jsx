@@ -422,17 +422,60 @@ async function extractPdfText(file, onProgress) {
   pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
   const pdf = await pdfjs.getDocument({ data: await file.arrayBuffer() }).promise;
-  const pages = []; // [{ page, text }]
+  const pageLines = []; // [{ page, lines: [] }]
   for (let i = 1; i <= pdf.numPages; i++) {
     if (onProgress) onProgress(`Reading page ${i} of ${pdf.numPages}...`);
     const page = await pdf.getPage(i);
     const content = await page.getTextContent();
     const raw = content.items.map(it => (it.str || "") + (it.hasEOL ? "\n" : "")).join("");
-    const text = raw
+    pageLines.push({ page: i, lines: raw.split("\n").map(l => l.replace(/\s+/g, " ").trim()).filter(Boolean) });
+  }
+
+  // Running headers/footers: short lines at the top/bottom of a page that repeat (digits
+  // ignored) on 30%+ of pages, AND either have no numbers or carry a number that climbs in
+  // step with the page ("Page 7 of 100", "Report | 37"). Section headings like "Section 12"
+  // repeat too, but their numbers don't track the page, so they are kept.
+  // Also drop bare page numbers ("12", "Page 12", "12 of 100").
+  const norm = l => l.toLowerCase().replace(/\d+/g, "#");
+  const seen = new Map(); // norm → [{ page, nums }]
+  for (const { page, lines } of pageLines) {
+    const edges = new Set([...lines.slice(0, 3), ...lines.slice(-3)].filter(l => l.length < 100));
+    const byKey = new Map();
+    edges.forEach(l => byKey.set(norm(l), l));
+    byKey.forEach((l, k) => {
+      if (!seen.has(k)) seen.set(k, []);
+      seen.get(k).push({ page, nums: (l.match(/\d+/g) || []).map(Number) });
+    });
+  }
+  const minRepeats = Math.max(3, Math.ceil(pageLines.length * 0.3));
+  const repeated = new Set();
+  seen.forEach((occ, k) => {
+    if (pageLines.length < 4 || occ.length < minRepeats) return;
+    if (!/#/.test(k)) { repeated.add(k); return; }
+    // Every number in the line must be fixed ("9125 Main St") or track the page
+    const mostCommon = vals => { const m = new Map(); vals.forEach(v => m.set(v, (m.get(v) || 0) + 1)); return Math.max(...m.values()); };
+    const positions = occ[0].nums.length;
+    let running = true;
+    for (let j = 0; j < positions && running; j++) {
+      const fixed = mostCommon(occ.map(o => o.nums[j]));
+      const tracks = mostCommon(occ.map(o => o.nums[j] - o.page));
+      running = Math.max(fixed, tracks) >= occ.length * 0.8;
+    }
+    if (running) repeated.add(k);
+  });
+  const isPageNumber = l => /^(page\s*)?\d+(\s*(of|\/)\s*\d+)?$/i.test(l);
+
+  const pages = []; // [{ page, text }]
+  for (const { page, lines } of pageLines) {
+    const kept = lines.filter((l, idx) => {
+      const atEdge = idx < 3 || idx >= lines.length - 3;
+      return !isPageNumber(l) && !(atEdge && repeated.has(norm(l)));
+    });
+    const text = kept.join("\n")
       .replace(/(\w)-\n(\w)/g, "$1$2")   // re-join words hyphenated across lines
       .replace(/\s+/g, " ")
       .trim();
-    if (text) pages.push({ page: i, text });
+    if (text) pages.push({ page, text });
   }
 
   const text = pages.map(p => p.text).join("\n\n");
@@ -480,10 +523,35 @@ function chunkSentences(sentences, max = TTS_CHUNK_CHARS) {
   return chunks;
 }
 
-/** Decoded duration of an MP3 clip in seconds (0 if the browser can't decode it) */
-async function clipDuration(ctx, buffer) {
-  try { return (await ctx.decodeAudioData(buffer.slice(0))).duration; }
-  catch { return 0; }
+/**
+ * Duration of an MP3 clip in seconds, by walking its frame headers.
+ * Cheap on memory (no decode), which matters for multi-hour PDFs.
+ */
+function mp3Duration(buffer) {
+  const b = new Uint8Array(buffer);
+  const BITRATES = {
+    1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],  // MPEG-1 Layer III
+    2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],      // MPEG-2/2.5 Layer III
+  };
+  const RATES = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+  let i = 0, seconds = 0;
+  if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) {           // skip ID3v2 tag
+    i = 10 + ((b[6] & 0x7f) << 21 | (b[7] & 0x7f) << 14 | (b[8] & 0x7f) << 7 | (b[9] & 0x7f));
+  }
+  while (i + 4 <= b.length) {
+    if (b[i] !== 0xff || (b[i + 1] & 0xe0) !== 0xe0) { i++; continue; }
+    const ver = (b[i + 1] >> 3) & 3;            // 3 = MPEG-1, 2 = MPEG-2, 0 = MPEG-2.5
+    const layer = (b[i + 1] >> 1) & 3;          // 1 = Layer III
+    const brIdx = b[i + 2] >> 4, srIdx = (b[i + 2] >> 2) & 3, pad = (b[i + 2] >> 1) & 1;
+    if (ver === 1 || layer !== 1 || brIdx === 0 || brIdx === 15 || srIdx === 3) { i++; continue; }
+    const bitrate = BITRATES[ver === 3 ? 1 : 2][brIdx] * 1000;
+    const rate = RATES[ver][srIdx];
+    const samples = ver === 3 ? 1152 : 576;
+    const len = Math.floor((samples / 8) * bitrate / rate) + pad;
+    seconds += samples / rate;
+    i += len;
+  }
+  return seconds;
 }
 
 /** Run fn over items with limited concurrency, keeping result order */
@@ -514,7 +582,7 @@ async function renderLongTextMp3(sentences, engine, voice, onProgress) {
 
   const buffers = await mapLimit(chunks, engine === "openai" ? 3 : 2, async (chunk) => {
     let lastErr;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 5; attempt++) {
       try {
         const buf = await fetchClip(chunk);
         done++;
@@ -522,7 +590,7 @@ async function renderLongTextMp3(sentences, engine, voice, onProgress) {
         return buf;
       } catch (err) {
         lastErr = err;
-        await new Promise(r => setTimeout(r, 1500 * (attempt + 1)));
+        await new Promise(r => setTimeout(r, [2000, 5000, 10000, 20000, 0][attempt]));
       }
     }
     throw lastErr;
@@ -530,32 +598,70 @@ async function renderLongTextMp3(sentences, engine, voice, onProgress) {
 
   // Timestamps: each chunk's real duration, split across its sentences by length
   if (onProgress) onProgress("Timing read-along...");
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const segments = [];
   let t = 0;
   for (let c = 0; c < groups.length; c++) {
-    const dur = await clipDuration(ctx, buffers[c]);
+    const dur = mp3Duration(buffers[c]);
     const total = groups[c].reduce((n, i) => n + sentences[i].text.length, 0) || 1;
     for (const i of groups[c]) {
       segments.push({ t: Math.round(t * 100) / 100, page: sentences[i].page, text: sentences[i].text });
       t += dur * sentences[i].text.length / total;
     }
   }
-  ctx.close();
 
-  return { blob: concatAudioBuffers(buffers), segments };
+  // Blob from the parts directly — avoids one more full-size copy for multi-hour audio
+  return { blob: new Blob(buffers, { type: "audio/mpeg" }), segments };
+}
+
+const SHARE_PART_BYTES = 10 * 1024 * 1024; // R2 multipart: every part but the last must be ≥ 5 MB
+
+async function shareCall(path, opts = {}) {
+  const res = await fetch(`${WORKER_URL}${path}`, opts);
+  const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+  if (!res.ok || data.error) throw new Error(data.error || `Share error ${res.status}`);
+  return data;
+}
+
+/** Upload one file to R2 in 10 MB parts through the Worker */
+async function uploadShareFile(id, name, blob, onBytes) {
+  const { uploadId } = await shareCall(`/share/${id}/${name}/start`, { method: "POST" });
+  const count = Math.max(1, Math.ceil(blob.size / SHARE_PART_BYTES));
+  const parts = await mapLimit([...Array(count).keys()], 3, async (i) => {
+    const body = blob.slice(i * SHARE_PART_BYTES, (i + 1) * SHARE_PART_BYTES);
+    let lastErr;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const part = await shareCall(`/share/${id}/${name}/part?uploadId=${encodeURIComponent(uploadId)}&n=${i + 1}`, { method: "PUT", body });
+        onBytes(body.size);
+        return part;
+      } catch (err) {
+        lastErr = err;
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+      }
+    }
+    throw lastErr;
+  });
+  await shareCall(`/share/${id}/${name}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uploadId, parts }),
+  });
 }
 
 /** Upload PDF + MP3 + read-along timings; returns the public share URL */
-async function createSharePage({ pdfFile, audioBlob, title, voice, segments }) {
-  const form = new FormData();
-  form.append("pdf", pdfFile, pdfFile.name);
-  form.append("audio", audioBlob, "audio.mp3");
-  form.append("meta", JSON.stringify({ title, voice, segments }));
-  const res = await fetch(`${WORKER_URL}/share`, { method: "POST", body: form });
-  const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-  if (!res.ok || data.error) throw new Error(data.error || `Share error ${res.status}`);
-  return data.url;
+async function createSharePage({ pdfFile, audioBlob, title, voice, segments }, onProgress) {
+  const { id } = await shareCall("/share", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title, voice, pdfName: pdfFile.name, segments }),
+  });
+  const total = pdfFile.size + audioBlob.size;
+  let sent = 0;
+  const onBytes = (n) => { sent += n; if (onProgress) onProgress(Math.round(sent / total * 100)); };
+  await uploadShareFile(id, "source.pdf", pdfFile, onBytes);
+  await uploadShareFile(id, "audio.mp3", audioBlob, onBytes);
+  const { url } = await shareCall(`/share/${id}/finish`, { method: "POST" });
+  return url;
 }
 
 function downloadBlob(blob, filename) {
@@ -1037,12 +1143,13 @@ function SharePageButton({ pdfDoc, pdfAudio, color }) {
   const [shareUrl, setShareUrl] = useState("");
   const [err, setErr] = useState("");
   const [copied, setCopied] = useState(false);
+  const [pct, setPct] = useState(0);
 
   // A new render means a new share page
   useEffect(() => { setStatus("idle"); setShareUrl(""); setErr(""); }, [pdfAudio]);
 
   const create = async () => {
-    setStatus("uploading"); setErr("");
+    setStatus("uploading"); setErr(""); setPct(0);
     try {
       const url = await createSharePage({
         pdfFile: pdfDoc.file,
@@ -1050,7 +1157,7 @@ function SharePageButton({ pdfDoc, pdfAudio, color }) {
         title: pdfDoc.name.replace(/\.pdf$/i, ""),
         voice: pdfAudio.voice,
         segments: pdfAudio.segments,
-      });
+      }, setPct);
       setShareUrl(url); setStatus("done");
     } catch (e) {
       setErr(e.message); setStatus("error");
@@ -1068,7 +1175,7 @@ function SharePageButton({ pdfDoc, pdfAudio, color }) {
         </div>
       ) : (
         <button onClick={create} disabled={status === "uploading"} style={{ ...btnS(color, status !== "uploading"), opacity: status === "uploading" ? 0.5 : 1, cursor: status === "uploading" ? "wait" : "pointer" }}>
-          {status === "uploading" ? "Uploading..." : status === "error" ? "⚠ Retry share page" : "🔗 Create share page"}
+          {status === "uploading" ? `Uploading... ${pct}%` : status === "error" ? "⚠ Retry share page" : "🔗 Create share page"}
         </button>
       )}
       <div style={{ fontSize: 13, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 8 }}>
@@ -1088,14 +1195,16 @@ function PdfAudioEstimate({ pdfDoc, voiceEngine, elBalance }) {
   if (voiceEngine === "browser") {
     return <div style={{ ...style, color: "#e0a030" }}>Browser Voice can't make an audio file. Pick OpenAI or ElevenLabs to download an MP3.</div>;
   }
+  const fmt = m => m >= 60 ? `${Math.floor(m / 60)} hr ${m % 60} min` : `${m} min`;
+  const renderNote = chars > 40000 && <> · takes several minutes — keep this tab open</>;
   if (voiceEngine === "openai") {
-    return <div style={{ ...style, color: "#10a37f" }}>~{mins} min of audio · est. OpenAI cost ${(chars / 1000 * 0.015).toFixed(2)}</div>;
+    return <div style={{ ...style, color: "#10a37f" }}>~{fmt(mins)} of audio · est. OpenAI cost ${(chars / 1000 * 0.015).toFixed(2)}{renderNote}</div>;
   }
   const remaining = elBalance ? elBalance.character_limit - elBalance.character_count : null;
   const short = remaining != null && chars > remaining;
   return (
     <div style={{ ...style, color: short ? "#e05050" : "#f0a030" }}>
-      ~{mins} min of audio · uses ~{chars.toLocaleString()} ElevenLabs characters
+      ~{fmt(mins)} of audio · uses ~{chars.toLocaleString()} ElevenLabs characters
       {remaining != null && <> of {remaining.toLocaleString()} remaining</>}
       {short && " — not enough credit for the whole PDF"}
     </div>
