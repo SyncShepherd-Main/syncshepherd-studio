@@ -159,6 +159,46 @@ export function renderSharePage(id, meta) {
 </html>`;
 }
 
+/** Password form for a protected share page (title deliberately not shown) */
+export function renderLockPage(id, error) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Password required</title>
+<link href="https://fonts.googleapis.com/css2?family=Heebo:wght@700;900&family=Roboto:wght@400;500&family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root { --blue: #0f70b7; --gold: #eeaf00; --navy: #192534; --bg: #0e1117; --card: #141a23; --border: #253040; --text: #c8d0d8; --muted: #8899aa; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Roboto', sans-serif; }
+  main { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+  form { width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 28px 24px; }
+  .brand { font-family: 'Heebo', sans-serif; font-weight: 700; font-size: 12px; letter-spacing: 0.14em; color: var(--gold); }
+  h1 { font-family: 'Heebo', sans-serif; font-weight: 900; color: #fff; font-size: 24px; margin: 8px 0 6px; }
+  p { margin: 0 0 18px; font-size: 15px; line-height: 1.6; color: var(--muted); }
+  input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: #fff; font-size: 17px; padding: 12px 14px; font-family: 'Roboto Mono', monospace; }
+  input:focus { outline: none; border-color: var(--blue); }
+  button { width: 100%; margin-top: 12px; background: var(--blue); color: #fff; border: 0; border-radius: 8px; padding: 12px; font-family: 'Heebo', sans-serif; font-weight: 700; font-size: 16px; letter-spacing: 0.06em; cursor: pointer; }
+  .err { color: #e06050; font-size: 14px; margin: 10px 0 0; font-family: 'Roboto Mono', monospace; }
+</style>
+</head>
+<body>
+<main>
+  <form method="post" action="/s/${id}/unlock">
+    <div class="brand">SYNCSHEPHERD STUDIO</div>
+    <h1>Password required</h1>
+    <p>Enter the password you were given to listen and read along. You'll only need to enter it once on this device.</p>
+    <input type="password" name="password" autocomplete="current-password" aria-label="Password" autofocus required>
+    <button type="submit">Unlock</button>
+    ${error ? `<div class="err">${escapeHtml(error)}</div>` : ""}
+  </form>
+</main>
+</body>
+</html>`;
+}
+
 export function renderNotFoundPage() {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex"><title>Link not found</title>
 <style>body{margin:0;background:#0e1117;color:#c8d0d8;font-family:Roboto,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:16px;text-align:center}</style></head>

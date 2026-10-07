@@ -69,7 +69,11 @@ Create `worker/.dev.vars`:
 ```
 ANTHROPIC_API_KEY=sk-ant-your-key-here
 ELEVENLABS_API_KEY=your-elevenlabs-key
+OPENAI_API_KEY=your-openai-key
+PAGECAST_KEY=dev-key
 ```
+
+`PAGECAST_KEY` must match the key the Vite dev proxy sends (`dev-key` unless you set `PAGECAST_KEY` in your shell).
 
 ### 3. Configure app environment
 
@@ -77,15 +81,12 @@ ELEVENLABS_API_KEY=your-elevenlabs-key
 cp app/.env.example app/.env
 ```
 
-`app/.env` for local dev:
+The app calls the Worker at `/api` in both dev and production, so `app/.env` can stay empty:
 ```
-VITE_WORKER_URL=http://localhost:8787
+VITE_WORKER_URL=/api
 ```
-
-For production builds:
-```
-VITE_WORKER_URL=https://pagecast-fetcher.syncshepherd.workers.dev
-```
+- **Production:** `/api/*` is a Pages Function (`app/functions/api/[[path]].js`) behind Zero Trust that adds the Worker key.
+- **Local dev:** Vite proxies `/api/*` to the Worker on :8787 with the dev key.
 
 ### 4. Run locally
 
@@ -117,6 +118,14 @@ Set secrets (one-time, or when keys change):
 ```bash
 npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put ELEVENLABS_API_KEY
+npx wrangler secret put OPENAI_API_KEY
+```
+
+The Worker rejects every route except public `/s/…` share pages unless the request has `X-PageCast-Key`. Set the same random value on the Worker and on Pages (one-time):
+```bash
+K=$(openssl rand -hex 32)
+echo "$K" | npx wrangler secret put PAGECAST_KEY
+echo "$K" | npx wrangler pages secret put WORKER_KEY --project-name pagecast
 ```
 
 ### Deploy the App (Cloudflare Pages)
@@ -124,8 +133,8 @@ npx wrangler secret put ELEVENLABS_API_KEY
 ```bash
 cd app
 
-# Set production Worker URL in .env
-echo "VITE_WORKER_URL=https://pagecast-fetcher.syncshepherd.workers.dev" > .env
+# Calls go through the /api Pages Function
+echo "VITE_WORKER_URL=/api" > .env
 
 # Build and deploy
 npx vite build

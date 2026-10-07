@@ -6,7 +6,9 @@ import { useState, useRef, useEffect, useCallback } from "react";
    No browser fetch. No CORS. No proxies. Server-side only.
 ───────────────────────────────────────────────────────────────────────────── */
 
-const WORKER_URL = import.meta.env.VITE_WORKER_URL || "http://localhost:8787";
+/* Calls go through the Pages Function at /api (behind Zero Trust), which adds the Worker key.
+   Local dev: Vite proxies /api to the local Worker (see vite.config.js). */
+const WORKER_URL = import.meta.env.VITE_WORKER_URL || "/api";
 
 /* ElevenLabs Voice IDs — NOT secrets (just identifiers), keys stay on the Worker */
 const ELEVENLABS_VOICES = {
@@ -173,7 +175,7 @@ async function fetchViaWorker(url) {
   if (!WORKER_URL) {
     throw new Error("Worker not configured — deploy the Cloudflare Worker first and set VITE_WORKER_URL in .env");
   }
-  const res = await fetch(`${WORKER_URL}?url=${encodeURIComponent(url)}`);
+  const res = await fetch(`${WORKER_URL}/fetch?url=${encodeURIComponent(url)}`);
   const data = await res.json();
   if (data.error) throw new Error(data.error);
   return data;
@@ -183,7 +185,7 @@ async function fetchViaWorkerWithLinks(url) {
   if (!WORKER_URL) {
     throw new Error("Worker not configured — deploy the Cloudflare Worker first and set VITE_WORKER_URL in .env");
   }
-  const res = await fetch(`${WORKER_URL}?url=${encodeURIComponent(url)}&links=true`);
+  const res = await fetch(`${WORKER_URL}/fetch?url=${encodeURIComponent(url)}&links=true`);
   const data = await res.json();
   if (data.error) throw new Error(data.error);
   return data;
@@ -324,11 +326,11 @@ async function generatePodcastMp3(scriptText, onProgress, voiceKey1 = "adam", vo
   return concatAudioBuffers(audioBuffers);
 }
 
-/** Generate single-voice MP3 via ElevenLabs */
-async function generateSingleVoiceMp3(scriptText, format, voiceKey1 = "adam") {
+/** Generate single-voice MP3 via ElevenLabs (chunked, any length) */
+async function generateSingleVoiceMp3(scriptText, format, voiceKey1 = "adam", onProgress) {
   const cleaned = cleanScriptForTTS(scriptText, format);
-  const buffer = await fetchTTSClip(cleaned, ELEVENLABS_VOICES[voiceKey1].id);
-  return new Blob([buffer], { type: "audio/mpeg" });
+  const { blob } = await renderLongTextMp3(splitIntoSentences([{ page: 1, text: cleaned }]), "elevenlabs", voiceKey1, onProgress);
+  return blob;
 }
 
 async function exportToMp3(scriptText, format, onProgress, voiceKey1 = "adam", voiceKey2 = "matilda") {
@@ -336,7 +338,7 @@ async function exportToMp3(scriptText, format, onProgress, voiceKey1 = "adam", v
   if (format === "podcast") {
     blob = await generatePodcastMp3(scriptText, onProgress, voiceKey1, voiceKey2);
   } else {
-    blob = await generateSingleVoiceMp3(scriptText, format, voiceKey1);
+    blob = await generateSingleVoiceMp3(scriptText, format, voiceKey1, onProgress);
   }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -351,7 +353,7 @@ async function generateMp3Blob(scriptText, format, onProgress, voiceKey1 = "adam
   if (format === "podcast") {
     return await generatePodcastMp3(scriptText, onProgress, voiceKey1, voiceKey2);
   } else {
-    return await generateSingleVoiceMp3(scriptText, format, voiceKey1);
+    return await generateSingleVoiceMp3(scriptText, format, voiceKey1, onProgress);
   }
 }
 
@@ -387,11 +389,11 @@ async function generatePodcastMp3OpenAI(scriptText, onProgress, voice1 = "onyx",
   return concatAudioBuffers(audioBuffers);
 }
 
-/** Generate single-voice MP3 via OpenAI */
-async function generateSingleVoiceMp3OpenAI(scriptText, format, voice1 = "onyx") {
+/** Generate single-voice MP3 via OpenAI (chunked — OpenAI caps each request at 4,096 chars) */
+async function generateSingleVoiceMp3OpenAI(scriptText, format, voice1 = "onyx", onProgress) {
   const cleaned = cleanScriptForTTS(scriptText, format);
-  const buffer = await fetchOpenAITTSClip(cleaned, voice1);
-  return new Blob([buffer], { type: "audio/mpeg" });
+  const { blob } = await renderLongTextMp3(splitIntoSentences([{ page: 1, text: cleaned }]), "openai", voice1, onProgress);
+  return blob;
 }
 
 async function exportToMp3OpenAI(scriptText, format, onProgress, voice1 = "onyx", voice2 = "alloy") {
@@ -399,7 +401,7 @@ async function exportToMp3OpenAI(scriptText, format, onProgress, voice1 = "onyx"
   if (format === "podcast") {
     blob = await generatePodcastMp3OpenAI(scriptText, onProgress, voice1, voice2);
   } else {
-    blob = await generateSingleVoiceMp3OpenAI(scriptText, format, voice1);
+    blob = await generateSingleVoiceMp3OpenAI(scriptText, format, voice1, onProgress);
   }
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -649,11 +651,11 @@ async function uploadShareFile(id, name, blob, onBytes) {
 }
 
 /** Upload PDF + MP3 + read-along timings; returns the public share URL */
-async function createSharePage({ pdfFile, audioBlob, title, voice, segments }, onProgress) {
+async function createSharePage({ pdfFile, audioBlob, title, voice, segments, password }, onProgress) {
   const { id } = await shareCall("/share", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ title, voice, pdfName: pdfFile.name, segments }),
+    body: JSON.stringify({ title, voice, pdfName: pdfFile.name, segments, password }),
   });
   const total = pdfFile.size + audioBlob.size;
   let sent = 0;
@@ -883,7 +885,7 @@ function AudioPlayer({ script, format, voiceEngine, openaiVoice1, openaiVoice2, 
       if (voiceEngine === "openai") {
         blob = format === "podcast"
           ? await generatePodcastMp3OpenAI(script, (msg) => setLoadingMsg(msg), openaiVoice1, openaiVoice2)
-          : await generateSingleVoiceMp3OpenAI(script, format, openaiVoice1);
+          : await generateSingleVoiceMp3OpenAI(script, format, openaiVoice1, (msg) => setLoadingMsg(msg));
       } else {
         blob = await generateMp3Blob(script, format, (msg) => setLoadingMsg(msg), elevenVoice1, elevenVoice2);
       }
@@ -1144,6 +1146,9 @@ function SharePageButton({ pdfDoc, pdfAudio, color }) {
   const [err, setErr] = useState("");
   const [copied, setCopied] = useState(false);
   const [pct, setPct] = useState(0);
+  // Remembered so the same share password is pre-filled next time (this browser only)
+  const [password, setPassword] = useState(() => { try { return localStorage.getItem("pagecast.sharePassword") || ""; } catch { return ""; } });
+  const [usedPassword, setUsedPassword] = useState("");
 
   // A new render means a new share page
   useEffect(() => { setStatus("idle"); setShareUrl(""); setErr(""); }, [pdfAudio]);
@@ -1157,7 +1162,10 @@ function SharePageButton({ pdfDoc, pdfAudio, color }) {
         title: pdfDoc.name.replace(/\.pdf$/i, ""),
         voice: pdfAudio.voice,
         segments: pdfAudio.segments,
+        password: password.trim(),
       }, setPct);
+      try { localStorage.setItem("pagecast.sharePassword", password.trim()); } catch { /* storage blocked */ }
+      setUsedPassword(password.trim());
       setShareUrl(url); setStatus("done");
     } catch (e) {
       setErr(e.message); setStatus("error");
@@ -1169,18 +1177,33 @@ function SharePageButton({ pdfDoc, pdfAudio, color }) {
   return (
     <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${BRAND.borderColor}` }}>
       {status === "done" ? (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-          <a href={shareUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 14, color, fontFamily: BRAND.monoFont, wordBreak: "break-all", flex: "1 1 260px" }}>{shareUrl}</a>
-          <button onClick={copy} style={btnS(color)}>{copied ? "✓ Copied" : "⎘ Copy link"}</button>
-        </div>
+        <>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <a href={shareUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 14, color, fontFamily: BRAND.monoFont, wordBreak: "break-all", flex: "1 1 260px" }}>{shareUrl}</a>
+            <button onClick={copy} style={btnS(color)}>{copied ? "✓ Copied" : "⎘ Copy link"}</button>
+          </div>
+          <div style={{ fontSize: 14, color: "#bcc8d4", fontFamily: BRAND.monoFont, marginTop: 8 }}>
+            {usedPassword ? <>🔒 Password: <span style={{ color: "#fff" }}>{usedPassword}</span></> : "🔓 Open link — no password"}
+          </div>
+        </>
       ) : (
+        <>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+          <label htmlFor="share-pw" style={{ fontSize: 12, color: "#8899aa", fontFamily: BRAND.monoFont, letterSpacing: "0.1em" }}>PASSWORD:</label>
+          <input id="share-pw" type="text" value={password} onChange={e => setPassword(e.target.value)} placeholder="optional"
+            disabled={status === "uploading"} autoComplete="off" spellCheck={false}
+            style={{ background: BRAND.cardBg, border: `1px solid ${BRAND.borderColor}`, borderRadius: 6, color: "#e0e0e0",
+              fontSize: 14, fontFamily: BRAND.monoFont, padding: "6px 10px", flex: "1 1 160px", maxWidth: 260 }} />
+        </div>
         <button onClick={create} disabled={status === "uploading"} style={{ ...btnS(color, status !== "uploading"), opacity: status === "uploading" ? 0.5 : 1, cursor: status === "uploading" ? "wait" : "pointer" }}>
           {status === "uploading" ? `Uploading... ${pct}%` : status === "error" ? "⚠ Retry share page" : "🔗 Create share page"}
         </button>
+        </>
       )}
       <div style={{ fontSize: 13, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 8 }}>
         {status === "error" ? <span style={{ color: "#e06050" }}>Share error: {err}</span>
-          : "Listen + read-along page with the original PDF. Anyone with the link can open it."}
+          : status === "done" ? "Listen + read-along page with the original PDF. Send the password along with the link."
+          : "Listen + read-along page with the original PDF. Leave the password blank for an open link. Listeners enter it once per device."}
       </div>
     </div>
   );
