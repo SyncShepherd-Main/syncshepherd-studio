@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 
 /* ─────────────────────────────────────────────────────────────────────────────
    PageCast — URL → Broadcast Engine
@@ -43,6 +43,25 @@ const VIBES = {
   storyteller:  { label: "Storyteller",  icon: "📖", desc: "Narrative, immersive, cinematic" },
   educational:  { label: "Educational",  icon: "🎓", desc: "Clear, patient, informative" },
   humorous:     { label: "Humorous",     icon: "😂", desc: "Witty, playful, entertaining" },
+};
+
+/* Narration vibes for word-for-word reading (OpenAI gpt-4o-mini-tts tone instructions).
+   "standard" = tts-1: no tone control, but the most literal reading. */
+const READ_FAITHFULLY = "Read the text exactly as written — do not add, skip, or change any words.";
+const NARRATION_VIBES = {
+  standard:     { label: "Standard",     icon: "🎙", desc: "Most faithful word-for-word reading (tts-1)", instructions: null },
+  professional: { label: "Professional", icon: "💼", desc: "Polished, confident, authoritative",
+    instructions: `Polished, confident, authoritative broadcast narrator. Clear diction, steady pace. ${READ_FAITHFULLY}` },
+  casual:       { label: "Casual",       icon: "😎", desc: "Relaxed, like talking to a friend",
+    instructions: `Relaxed and conversational, like talking to a friend. Natural and unhurried. ${READ_FAITHFULLY}` },
+  energetic:    { label: "Energetic",    icon: "⚡", desc: "Upbeat and lively",
+    instructions: `Upbeat and energetic with a lively pace, while keeping every word clear. ${READ_FAITHFULLY}` },
+  storyteller:  { label: "Storyteller",  icon: "📖", desc: "Warm, immersive, dramatic pauses",
+    instructions: `Warm, immersive storyteller. Vary pace and emphasis and pause naturally at dramatic moments. ${READ_FAITHFULLY}` },
+  educational:  { label: "Educational",  icon: "🎓", desc: "Clear, patient teacher",
+    instructions: `Clear, patient teacher. Measured pace, gently emphasizing key ideas. ${READ_FAITHFULLY}` },
+  humorous:     { label: "Humorous",     icon: "😂", desc: "Light and warm, smile in the voice",
+    instructions: `Light, warm and playful, with a smile in the voice — never mocking. ${READ_FAITHFULLY}` },
 };
 
 /* ─── SyncShepherd Brand ─────────────────────────────────────────────────── */
@@ -359,12 +378,15 @@ async function generateMp3Blob(scriptText, format, onProgress, voiceKey1 = "adam
 
 /* ─── OpenAI TTS Export ──────────────────────────────────────────────────── */
 
-/** Fetch a single TTS clip via Worker (OpenAI proxy) */
-async function fetchOpenAITTSClip(text, voice) {
+/** Fetch a single TTS clip via Worker (OpenAI proxy). With instructions (a narration vibe)
+    it uses gpt-4o-mini-tts, which can follow tone directions; otherwise tts-1. */
+async function fetchOpenAITTSClip(text, voice, instructions) {
   const res = await fetch(`${WORKER_URL}/tts-openai`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, voice: voice || "onyx", model: "tts-1" }),
+    body: JSON.stringify(instructions
+      ? { text, voice: voice || "onyx", model: "gpt-4o-mini-tts", instructions }
+      : { text, voice: voice || "onyx", model: "tts-1" }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
@@ -494,8 +516,11 @@ async function extractPdfText(file, onProgress) {
   // Pass 2: page text. Headings (larger font, no end punctuation) get a period so the
   // narrator pauses and they become their own sentence for read-along / chapter jumps.
   const pages = []; // [{ page, text }]
+  const isHeadingLine = l => bodySize && l.h >= bodySize * 1.2 && l.text.length <= 120;
   for (const { page, lines } of keptByPage) {
-    const text = lines.map(l => (bodySize && l.h >= bodySize * 1.2 && l.text.length <= 120 && !/[.!?:;,]$/.test(l.text)) ? `${l.text}.` : l.text)
+    // A heading wrapped over several lines gets one period, after its last line
+    const text = lines.map((l, i) => (isHeadingLine(l) && !/[.!?:;,]$/.test(l.text)
+      && !(lines[i + 1] && isHeadingLine(lines[i + 1]) && lines[i + 1].h === l.h)) ? `${l.text}.` : l.text)
       .join("\n")
       .replace(/(\w)-\n(\w)/g, "$1$2")   // re-join words hyphenated across lines
       .replace(/\s+/g, " ")
@@ -509,15 +534,30 @@ async function extractPdfText(file, onProgress) {
   }
   // Chapters: the PDF's own bookmarks if it has them, else large-font headings
   const outline = await readPdfOutline(pdf);
-  const chapters = outline.length ? outline : detectHeadings(keptLines);
+  const sentences = splitIntoSentences(pages);
+  const chapters = locateChapters(outline.length ? outline : detectHeadings(keptLines), sentences);
+  const sections = buildSections(chapters, sentences.length);
+
+  // Spoken intro: PDF title/author metadata, else page 1's two largest heading sizes
+  const info = (await pdf.getMetadata().catch(() => null))?.info || {};
+  // Ignore metadata titles that are really file names ("book.html", "Microsoft Word - draft.docx")
+  if (/\.(html?|pdf|docx?|pages|txt|rtf)$|^microsoft (word|powerpoint)|^untitled/i.test((info.Title || "").trim())) info.Title = "";
+  // Page 1's original lines — the author's name may repeat as a running header elsewhere
+  const page1 = pageLines[0] ? pageLines[0].lines.map((text, i) => ({ text, h: pageLines[0].heights[i] })) : [];
+  // Only when there's front matter before the first chapter for the intro to stand in for
+  const intro = sections[0].key === "front"
+    ? (info.Title ? [info.Title, info.Author].filter(Boolean).join(". ") : titleFromLines(page1, bodySize))
+    : "";
 
   return {
     name: file.name,
     file,
     text,
     chapters,
+    sections,
+    intro,
     chapterSource: outline.length ? "bookmarks" : "headings",
-    sentences: splitIntoSentences(pages),
+    sentences,
     pages: pdf.numPages,
     words: text.split(/\s+/).filter(Boolean).length,
     chars: text.length,
@@ -581,6 +621,62 @@ function detectHeadings(lines) {
   let picked = candidates.filter(c => levelOf(c.h) <= 2);
   if (picked.length > 300) picked = picked.filter(c => levelOf(c.h) === 1);
   return picked.map(c => ({ title: c.title, page: c.page, level: levelOf(c.h) }));
+}
+
+/** Index of each chapter's first sentence (its title on its page, else the page's first sentence) */
+const normTitle = t => t.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+function locateChapters(chapters, sentences) {
+  const normed = sentences.map(s => normTitle(s.text));
+  return chapters.map(c => {
+    const key = normTitle(c.title).slice(0, 40);
+    let i = key ? sentences.findIndex((s, j) => s.page === c.page && normed[j].includes(key)) : -1;
+    if (i < 0) i = sentences.findIndex(s => s.page >= c.page);
+    return { ...c, sentence: i };
+  }).filter(c => c.sentence >= 0);
+}
+
+/* Sections a listener might not want read aloud */
+const SKIP_BY_DEFAULT = /^(table of )?contents$|^(sources|references|bibliography|works cited|index|endnotes|notes|acknowledg(e)?ments)$/i;
+
+/**
+ * Top-level chapters as sentence ranges, plus the front matter before the first one.
+ * Each: { key, title, page, start, end, skip } — skip = default for the checkbox.
+ */
+function buildSections(chapters, total) {
+  if (!chapters.length) return [{ key: "all", title: "Whole document", page: 1, start: 0, end: total, skip: false }];
+  const top = Math.min(...chapters.map(c => c.level || 1));
+  const heads = chapters.filter(c => (c.level || 1) === top).sort((a, b) => a.sentence - b.sentence);
+  const out = [];
+  if (heads[0].sentence > 0) out.push({ key: "front", title: "Front page", page: 1, start: 0, end: heads[0].sentence, skip: false });
+  heads.forEach((c, i) => {
+    const end = i + 1 < heads.length ? heads[i + 1].sentence : total;
+    if (end > c.sentence) out.push({ key: `c${i}`, title: c.title, page: c.page, start: c.sentence, end, skip: SKIP_BY_DEFAULT.test(c.title.replace(/[^a-z ]/gi, "").trim()) });
+  });
+  return out;
+}
+
+/** "Title. Author." from the first page's two largest font sizes (same-size lines joined) */
+function titleFromLines(lines, bodySize) {
+  const sizes = [...new Set(lines.filter(l => l.h >= bodySize * 1.2).map(l => l.h))].sort((a, b) => b - a).slice(0, 2);
+  if (!sizes.length) return "";
+  const parts = [];
+  let prevH = null;
+  for (const l of lines) {
+    if (!sizes.includes(l.h)) { prevH = null; continue; }
+    if (prevH === l.h) parts[parts.length - 1] += " " + l.text.replace(/\.$/, "");
+    else parts.push(l.text.replace(/\.$/, ""));
+    prevH = l.h;
+  }
+  return parts.join(". ").slice(0, 300) + ".";
+}
+
+/** The sentences to narrate: spoken intro + every section not skipped */
+function narrationSentences(pdfDoc, skip, intro) {
+  const out = intro.trim() ? splitIntoSentences([{ page: 1, text: intro.trim() }]) : [];
+  for (const sec of pdfDoc.sections) {
+    if (!skip.has(sec.key)) out.push(...pdfDoc.sentences.slice(sec.start, sec.end));
+  }
+  return out;
 }
 
 /** Give each chapter the audio time of its first sentence (title match on its page, else page start) */
@@ -674,12 +770,12 @@ async function mapLimit(items, limit, fn) {
  * Render sentences of any total length to one MP3 in a single voice (OpenAI or ElevenLabs).
  * Returns { blob, segments } — segments are [{ t, page, text }] start times for read-along.
  */
-async function renderLongTextMp3(sentences, engine, voice, onProgress) {
+async function renderLongTextMp3(sentences, engine, voice, onProgress, instructions) {
   const groups = chunkSentences(sentences);
   const chunks = groups.map(g => g.map(i => sentences[i].text).join(" "));
   let done = 0;
   const fetchClip = (chunk) => engine === "openai"
-    ? fetchOpenAITTSClip(chunk, voice)
+    ? fetchOpenAITTSClip(chunk, voice, instructions)
     : fetchTTSClip(chunk, ELEVENLABS_VOICES[voice].id);
 
   const buffers = await mapLimit(chunks, engine === "openai" ? 3 : 2, async (chunk) => {
@@ -1315,10 +1411,46 @@ function SharePageButton({ pdfDoc, pdfAudio, color }) {
   );
 }
 
-function PdfAudioEstimate({ pdfDoc, voiceEngine, elBalance }) {
-  if (!pdfDoc) return null;
-  const chars = pdfDoc.chars;
-  const mins = Math.max(1, Math.round(pdfDoc.words / 150));
+/** What to narrate: spoken intro + include/skip per top-level chapter */
+function NarrationPicker({ pdfDoc, skip, setSkip, intro, setIntro, color, disabled }) {
+  const toggle = key => setSkip(prev => {
+    const next = new Set(prev);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
+  return (
+    <div style={{ marginTop: 16, background: BRAND.cardBg, border: `1px solid ${BRAND.borderColor}`, borderRadius: 10, padding: "12px 14px" }}>
+      <div style={{ fontSize: 12, color: "#8899aa", fontFamily: BRAND.monoFont, letterSpacing: "0.1em", marginBottom: 8 }}>WHAT TO NARRATE:</div>
+      <label style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 13, color: "#bcc8d4", fontFamily: BRAND.monoFont, marginBottom: 10 }}>
+        Spoken intro
+        <input value={intro} onChange={e => setIntro(e.target.value)} disabled={disabled} placeholder="optional — e.g. title and author" spellCheck={false}
+          style={{ flex: "1 1 260px", background: BRAND.darkBg, border: `1px solid ${BRAND.borderColor}`, borderRadius: 6, color: "#e0e0e0", fontSize: 14, fontFamily: BRAND.bodyFont, padding: "6px 10px" }} />
+      </label>
+      <div style={{ maxHeight: 240, overflowY: "auto", scrollbarWidth: "thin" }}>
+        {pdfDoc.sections.map(sec => {
+          const on = !skip.has(sec.key);
+          return (
+            <label key={sec.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 2px", cursor: disabled ? "default" : "pointer",
+              fontSize: 14, fontFamily: BRAND.bodyFont, color: on ? "#e0e0e0" : "#667" }}>
+              <input type="checkbox" checked={on} onChange={() => toggle(sec.key)} disabled={disabled} style={{ accentColor: color }} />
+              <span style={{ flex: 1, textDecoration: on ? "none" : "line-through" }}>{sec.title}</span>
+              <span style={{ fontSize: 12, fontFamily: BRAND.monoFont, color: "#8899aa" }}>p{sec.page}</span>
+            </label>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 12, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 8 }}>
+        Unchecked parts aren't read aloud. They still show in the PDF view of the share page.
+      </div>
+    </div>
+  );
+}
+
+function PdfAudioEstimate({ narration, voiceEngine, elBalance, vibed }) {
+  if (!narration || !narration.length) return null;
+  const chars = narration.reduce((n, s) => n + s.text.length + 1, 0);
+  const words = narration.reduce((n, s) => n + s.text.split(/\s+/).length, 0);
+  const mins = Math.max(1, Math.round(words / 150));
   const style = { fontSize: 14, fontFamily: BRAND.monoFont, marginTop: 10, paddingLeft: 2 };
 
   if (voiceEngine === "browser") {
@@ -1327,7 +1459,9 @@ function PdfAudioEstimate({ pdfDoc, voiceEngine, elBalance }) {
   const fmt = m => m >= 60 ? `${Math.floor(m / 60)} hr ${m % 60} min` : `${m} min`;
   const renderNote = chars > 40000 && <> · takes several minutes — keep this tab open</>;
   if (voiceEngine === "openai") {
-    return <div style={{ ...style, color: "#10a37f" }}>~{fmt(mins)} of audio · est. OpenAI cost ${(chars / 1000 * 0.015).toFixed(2)}{renderNote}</div>;
+    // tts-1: $0.015 / 1K chars · gpt-4o-mini-tts (vibes): ~$0.015 per minute of audio
+    const cost = vibed ? mins * 0.015 : chars / 1000 * 0.015;
+    return <div style={{ ...style, color: "#10a37f" }}>~{fmt(mins)} of audio · est. OpenAI cost ${cost.toFixed(2)}{renderNote}</div>;
   }
   const remaining = elBalance ? elBalance.character_limit - elBalance.character_count : null;
   const short = remaining != null && chars > remaining;
@@ -1482,7 +1616,7 @@ function previewText(sampleText, label) {
   return end > 80 ? cut.slice(0, end + 1) : cut.slice(0, cut.lastIndexOf(" ")) + "...";
 }
 
-function VoicePreviewButton({ engine, voice, sampleText }) {
+function VoicePreviewButton({ engine, voice, sampleText, instructions }) {
   const [state, setState] = useState("idle"); // idle | loading | playing | error
   const [err, setErr] = useState("");
   const audioRef = useRef(null);
@@ -1494,20 +1628,20 @@ function VoicePreviewButton({ engine, voice, sampleText }) {
   };
 
   // Stop when the voice changes or the picker unmounts
-  useEffect(() => stop, [engine, voice]);
+  useEffect(() => stop, [engine, voice, instructions]);
   useEffect(() => () => Object.values(cacheRef.current).forEach(u => URL.revokeObjectURL(u)), []);
 
   const play = async () => {
     if (state === "playing" || state === "loading") { stop(); return; }
     const label = engine === "openai" ? OPENAI_VOICES[voice].label : ELEVENLABS_VOICES[voice].label;
     const text = previewText(sampleText, label);
-    const key = `${engine}|${voice}|${text}`;
+    const key = `${engine}|${voice}|${instructions || ""}|${text}`;
     setErr("");
     try {
       if (!cacheRef.current[key]) {
         setState("loading");
         const buf = engine === "openai"
-          ? await fetchOpenAITTSClip(text, voice)
+          ? await fetchOpenAITTSClip(text, voice, instructions)
           : await fetchTTSClip(text, ELEVENLABS_VOICES[voice].id);
         cacheRef.current[key] = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
       }
@@ -1536,7 +1670,7 @@ function VoicePreviewButton({ engine, voice, sampleText }) {
   );
 }
 
-function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBilling, output, format, sampleText,
+function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBilling, output, format, sampleText, previewInstructions,
   openaiVoice1, setOpenaiVoice1, openaiVoice2, setOpenaiVoice2,
   elevenVoice1, setElevenVoice1, elevenVoice2, setElevenVoice2 }) {
 
@@ -1600,7 +1734,7 @@ function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBi
               ))}
             </select>
           )}
-          <VoicePreviewButton engine={engine} voice={engine === "openai" ? openaiVoice1 : elevenVoice1} sampleText={sampleText} />
+          <VoicePreviewButton engine={engine} voice={engine === "openai" ? openaiVoice1 : elevenVoice1} sampleText={sampleText} instructions={engine === "openai" ? previewInstructions : null} />
 
           {isPodcast && (
             <>
@@ -1619,7 +1753,7 @@ function VoiceEngineSelector({ engine, onChange, meta, elBalance, elError, oaiBi
                   ))}
                 </select>
               )}
-              <VoicePreviewButton engine={engine} voice={engine === "openai" ? openaiVoice2 : elevenVoice2} sampleText={sampleText} />
+              <VoicePreviewButton engine={engine} voice={engine === "openai" ? openaiVoice2 : elevenVoice2} sampleText={sampleText} instructions={engine === "openai" ? previewInstructions : null} />
             </>
           )}
         </div>
@@ -1718,10 +1852,15 @@ export default function PageCast() {
   const [pdfMsg, setPdfMsg]             = useState("");
   const [pdfMode, setPdfMode]           = useState("verbatim");
   const [pdfAudio, setPdfAudio]         = useState(null);   // { url, name }
+  const [pdfSkip, setPdfSkip]           = useState(new Set()); // section keys left out of the audio
+  const [pdfIntro, setPdfIntro]         = useState("");        // spoken intro line
+  const [readVibe, setReadVibe]         = useState("standard"); // narration vibe (word-for-word)
   const outputRef = useRef(null);
   const meta = FORMAT_META[format];
   const busy = phase === "running";
   const pdfVerbatim = inputMode === "pdf" && pdfMode === "verbatim";
+  const narration = useMemo(() => pdfDoc ? narrationSentences(pdfDoc, pdfSkip, pdfIntro) : [], [pdfDoc, pdfSkip, pdfIntro]);
+  const readInstructions = voiceEngine === "openai" ? NARRATION_VIBES[readVibe].instructions : null;
 
   const handlePdfFile = useCallback(async (file) => {
     if (!(file.type === "application/pdf" || /\.pdf$/i.test(file.name))) {
@@ -1734,6 +1873,9 @@ export default function PageCast() {
     setPdfAudio(prev => { if (prev) URL.revokeObjectURL(prev.url); return null; });
     try {
       const doc = await extractPdfText(file, setPdfMsg);
+      // Defaults: skip Contents/Sources-type sections; with an intro, skip the front page
+      setPdfSkip(new Set(doc.sections.filter(s => s.skip || (s.key === "front" && doc.intro)).map(s => s.key)));
+      setPdfIntro(doc.intro);
       setPdfDoc(doc); setPdfStatus("ready");
     } catch (e) {
       setPdfDoc(null); setPdfStatus("error"); setError(e.message);
@@ -1746,10 +1888,14 @@ export default function PageCast() {
     setPdfAudio(prev => { if (prev) URL.revokeObjectURL(prev.url); return null; });
     try {
       const voice = voiceEngine === "openai" ? openaiVoice1 : elevenVoice1;
-      const { blob, segments } = await renderLongTextMp3(pdfDoc.sentences, voiceEngine, voice, setStatus);
+      if (!narration.length) { setPhase("idle"); setError("Nothing selected to narrate."); return; }
+      const { blob, segments } = await renderLongTextMp3(narration, voiceEngine, voice, setStatus, readInstructions);
       const name = `${pdfDoc.name.replace(/\.pdf$/i, "")}-${voice}.mp3`;
       downloadBlob(blob, name);
-      setPdfAudio({ url: URL.createObjectURL(blob), name, blob, segments, voice, chapters: placeChapters(pdfDoc.chapters, segments) });
+      // Contents only lists chapters whose section is narrated
+      const included = pdfDoc.sections.filter(sec => !pdfSkip.has(sec.key));
+      const chapters = pdfDoc.chapters.filter(c => included.some(sec => c.sentence >= sec.start && c.sentence < sec.end));
+      setPdfAudio({ url: URL.createObjectURL(blob), name, blob, segments, voice, chapters: placeChapters(chapters, segments) });
       setPhase("idle");
       if (voiceEngine === "elevenlabs") refreshBalance();
     } catch (e) {
@@ -1946,7 +2092,35 @@ export default function PageCast() {
                 </button>
               ))}
             </div>
-            {pdfVerbatim && <PdfAudioEstimate pdfDoc={pdfDoc} voiceEngine={voiceEngine} elBalance={elBalance} />}
+            {pdfVerbatim && pdfDoc && pdfDoc.sections.length > 1 && (
+              <NarrationPicker pdfDoc={pdfDoc} skip={pdfSkip} setSkip={setPdfSkip} intro={pdfIntro} setIntro={setPdfIntro} color={meta.color} disabled={busy} />
+            )}
+            {pdfVerbatim && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize:12, color:"#8899aa", fontFamily:BRAND.monoFont, letterSpacing:"0.1em", marginBottom:8 }}>VIBE:</div>
+                <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+                  {Object.entries(NARRATION_VIBES).map(([id, v]) => (
+                    <button key={id} onClick={() => setReadVibe(id)} title={v.desc} disabled={voiceEngine !== "openai"} style={{
+                      background: readVibe === id && voiceEngine === "openai" ? `${meta.color}20` : "transparent",
+                      border: `1px solid ${readVibe === id && voiceEngine === "openai" ? meta.color : "#333"}`,
+                      borderRadius: 7, padding: "6px 12px",
+                      color: readVibe === id && voiceEngine === "openai" ? meta.color : "#777",
+                      fontSize: 13, fontFamily: BRAND.monoFont,
+                      cursor: voiceEngine === "openai" ? "pointer" : "not-allowed", transition: "all 0.15s",
+                      opacity: voiceEngine === "openai" ? 1 : 0.5,
+                    }}>
+                      {v.icon} {v.label}
+                    </button>
+                  ))}
+                </div>
+                <div style={{ fontSize: 13, color: "#8899aa", fontFamily: BRAND.monoFont, marginTop: 6 }}>
+                  {voiceEngine !== "openai" ? "Vibes work with OpenAI voices."
+                    : readVibe === "standard" ? "Standard is the most faithful word-for-word reading. Pick a vibe for tone, then ▶ Preview to hear it."
+                    : `${NARRATION_VIBES[readVibe].desc} — uses OpenAI's expressive voice model. ▶ Preview to hear it.`}
+                </div>
+              </div>
+            )}
+            {pdfVerbatim && <PdfAudioEstimate narration={narration} voiceEngine={voiceEngine} elBalance={elBalance} vibed={!!readInstructions} />}
           </div>
         )}
 
@@ -1989,7 +2163,8 @@ export default function PageCast() {
 
         {/* Voice engine + voice selection */}
         <VoiceEngineSelector engine={voiceEngine} onChange={setVoiceEngine} meta={meta} elBalance={elBalance} elError={elError} oaiBilling={oaiBilling} output={null} format={pdfVerbatim ? "tts" : format}
-          sampleText={inputMode === "pdf" && pdfDoc ? pdfDoc.text.slice(0, 2000) : ""}
+          sampleText={inputMode === "pdf" && pdfDoc ? (pdfVerbatim ? narration.slice(0, 12).map(x => x.text).join(" ") : pdfDoc.text.slice(0, 2000)) : ""}
+          previewInstructions={pdfVerbatim ? readInstructions : null}
           openaiVoice1={openaiVoice1} setOpenaiVoice1={setOpenaiVoice1} openaiVoice2={openaiVoice2} setOpenaiVoice2={setOpenaiVoice2}
           elevenVoice1={elevenVoice1} setElevenVoice1={setElevenVoice1} elevenVoice2={elevenVoice2} setElevenVoice2={setElevenVoice2} />
 
